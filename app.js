@@ -502,21 +502,24 @@ const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面
 ` + RO_RULES + `只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
 {"words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思。称呼对方的词（ប្អូន、បង、ពូ、មីង）在句子里当「你」用时，写成 你（弟妹辈）、你（哥姐辈）、你（叔辈）、你（姨辈），不要只写弟妹、哥姐，words 里这个词的 zh 也这样写","note":"只有译文和中文原话意思有出入、或者这句话容易引起误会时才写，一句话说完；没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
 words 里每个词的 km 按顺序直接拼起来必须正好等于整句译文（空格不算）。`;
+/* 2026-11-13：老板问"什么时候娶老婆"，员工答的话被逐词翻成"等有钱了再拿"。原因：翻员工的话时只给了这一句，没给前面在聊什么，也没要求写成中国人会说的话 */
+const ZH_NATURAL = `先在 lit 里写逐词直译的中文（lit 不看刚才的对话，每个词只按它最常见的字面意思写），再在 zh 里写成中国人平时真会这么说的一句口语，让老板一眼看懂。高棉语口语常常省掉对象，还爱用意思很宽的动词，一个词在中文里要按场合换成不同的说法；zh 里要用中文在这个场合习惯用的那个动词，把省掉的对象补出来。后面如果附了「刚才的对话」，他这句多半是在接上一句，要按上一句在聊什么来确定他指的是什么。刚才的对话只用来弄清他指什么，听写只按这次听到的内容，不能凭对话去猜，也不能加他没说的意思；这句和刚才的对话接不上时，就按字面写，不要硬凑。`;
 const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音应该是一位柬埔寨员工对中国老板说的一句高棉语口语，但也可能没人说话，或者说的不是高棉语。老板做饮料自动贩卖机生意。
 
 要求：
 1. 先判断录音里有没有人在说话。只有杂音、呼吸声、敲击声，或者什么声音都没有，speech 填 false，其他都留空。绝对不要编造内容，没听到就是没听到。
 2. lang 填他说的是什么语言：km 高棉语，zh 中文，en 英语，other 其他。
-3. 说的是高棉语：km 里一字不差写成高棉文，zh 翻成自然、简短的中文口语，让老板一眼看懂。说的不是高棉语：km 里用那种语言的文字照原话写下来，zh 仍然写中文意思。
-4. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
-5. 听不清、或者拿不准他说的是什么时，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
+3. 说的是高棉语：km 里一字不差写成高棉文。说的不是高棉语：km 里用那种语言的文字照原话写下来，zh 仍然写中文意思。
+4. ` + ZH_NATURAL + `
+5. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
+6. 听不清、或者拿不准他说的是什么时，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
 
-只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"speech":true,"lang":"km","km":"听到的原话","zh":"中文意思","sure":true,"note":""}`;
+只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"speech":true,"lang":"km","km":"听到的原话","lit":"逐词直译的中文","zh":"中国人会说的中文","sure":true,"note":""}`;
 const TR_V = 9;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
 const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
-const audioParts = async wav => [{ inlineData: { mimeType: 'audio/wav', data: await blobToB64(wav) } }, { text: '请听这段录音。' }];
+const audioParts = async (wav, more) => [{ inlineData: { mimeType: 'audio/wav', data: await blobToB64(wav) } }, { text: '请听这段录音。' + (more || '') }];
 function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words: [], back: '', note: '', tip: '', by: '谷歌', ts: Date.now(), uses: 0, staff: null, v: trVer() }; }
 async function quickKm(zh, prev) {
   let user = '中文原话：' + zh;
@@ -531,11 +534,20 @@ async function hearZh(wav) {   // 听中文录音，一步出中文原话和高�
   const j = jsonOf(await gGen(sysZhAudio(), await audioParts(wav), '听和翻译'), '谷歌');
   return { zh: String(j.zh || '').trim(), km: String(j.km || j.draft || '').trim() };
 }
-async function hearKm(wav, opt) {   // 听高棉语录音，一步出高棉文和中文意思
-  const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav), '听和翻译', false, opt), '谷歌');
+/* 带上刚才的对话，中文才翻得像人话；但实测（2026-11-13）带着对话去听一段没人说话的录音，它会顺着对话编一句像样的回答。
+   所以同时听两遍：一遍不给对话，听到什么以这遍为准；一遍给对话，两遍听到的高棉文一样才用它的中文。不一样就拿不给对话那遍的高棉文，另外带着对话翻一次。 */
+async function hearKm(wav, opt, ctx) {
+  if (!ctx) return hearKm1(wav, opt);
+  const [a, b] = await Promise.all([hearKm1(wav, opt), hearKm1(wav, opt, ctx).catch(() => null)]);
+  if (!a.km || !a.zh || a.lang !== 'km') return a;
+  if (b && b.zh && normKm(a.km) === normKm(b.km)) return b;
+  try { const j = await kmToZh(a.km, ctx); return Object.assign({}, a, { zh: j.zh, lit: j.lit, sure: a.sure && j.sure, note: [a.note, j.note].filter(Boolean).join(' ') }); } catch (e) { return a; }
+}
+async function hearKm1(wav, opt, ctx) {   // 听高棉语录音，一步出高棉文和中文意思。ctx：刚才几句对话
+  const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav, ctxTail(ctx)), '听和翻译', false, opt), '谷歌');
   if (j.speech === false) return { km: '', zh: '', sure: false, note: '' };
   const lang = String(j.lang || 'km'), other = lang !== 'km' ? '他说的不是高棉语' + ({ en: '，是英语', zh: '，是中文' }[lang] || '') + '。' : '';
-  return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), sure: j.sure !== false, note: other + String(j.note || ''), lang };
+  return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), lit: litOf(j), sure: j.sure !== false, note: other + String(j.note || ''), lang };
 }
 async function fillDetail(p) {
   const j = jsonOf(await gGen(sysDetail(), [{ text: '中文原话：' + p.zh + '\n高棉语译文：' + p.km }], '逐词拆分'), '谷歌');
@@ -663,16 +675,19 @@ const MIC_SVG = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" str
 const SYS_KM = `你是精通高棉语和中文的口译员。下面是一位柬埔寨员工对中国老板说的一句高棉语口语，是语音识别出来的文字，可能有同音错字、漏字、断词错误。老板做饮料自动贩卖机生意。
 
 要求：
-1. 先结合上下文纠正明显的识别错误，再翻成自然、简短的中文口语，让老板一眼看懂。
-2. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
-3. 如果这段文字不通顺，你拿不准他说的是什么，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
+1. 先结合上下文纠正明显的识别错误。
+2. ` + ZH_NATURAL + `
+3. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
+4. 如果这段文字不通顺，你拿不准他说的是什么，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
 
-只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"zh":"中文意思","sure":true,"note":""}`;
-async function kmToZh(km) {
-  const raw = await llm(SYS_KM, '识别出来的高棉语：' + km);
+只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"lit":"逐词直译的中文","zh":"中国人会说的中文","sure":true,"note":""}`;
+const ctxTail = ctx => ctx ? '\n\n刚才的对话（从早到晚，只用来弄清他这句指的是什么，不要翻译它们）：\n' + ctx : '';
+const litOf = (j) => { const l = String(j.lit || '').trim(), z = String(j.zh || '').trim(), n = t => t.replace(/[\s，。！？,.!?、]/g, ''); return l && n(l) !== n(z) ? l : ''; };   // 字面和意思一样就不显示
+async function kmToZh(km, ctx) {
+  const raw = await llm(SYS_KM, '识别出来的高棉语：' + km + ctxTail(ctx));
   let j; try { j = JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch (e) { throw new AppErr(engineName() + '回的内容格式不对，再试一次', raw.slice(0, 300)); }
   if (!j.zh) throw new AppErr(engineName() + '没给出中文意思，再试一次', raw.slice(0, 300));
-  return { zh: String(j.zh), sure: j.sure !== false, note: String(j.note || '') };
+  return { zh: String(j.zh), lit: litOf(j), sure: j.sure !== false, note: String(j.note || '') };
 }
 function viewTr() {
   let log = (S.log || []).slice(), active = -1, pend = null, err = null;
@@ -696,7 +711,7 @@ function viewTr() {
   const persist = () => { S.log = log.slice(-40); save(); };
   const setErr = (side, e) => { console.error(e); pend = null; err = { side, zh: e instanceof AppErr ? e.zh : '程序出错了', detail: e instanceof AppErr ? e.detail : String(e && (e.stack || e.message) || e) }; render(); };
   function bubble(x, i) {
-    if (x.t === 'st') return `<div class="bub st"><p class="who">员工说</p><p class="km" lang="km">${esc(x.km)}</p><p class="bz">${esc(x.zh)}</p>${x.secs ? `<p class="bnote">录到 ${esc(x.secs)} 秒${+x.secs < 1.2 ? '，很短，可能没录全' : ''}${WAVS.has(x) ? `\u3000<button class="lk" data-act="replay" data-i="${i}" style="color:var(--pri);padding:0">听录音</button>` : ''}</p>` : ''}${x.sure === false ? `<p class="unsure">机器可能没听准，最好请他再说一遍。${esc(x.note)}</p>` : (x.note ? `<p class="bnote">${esc(x.note)}</p>` : '')}</div>`;
+    if (x.t === 'st') return `<div class="bub st"><p class="who">员工说</p><p class="km" lang="km">${esc(x.km)}</p><p class="bz">${esc(x.zh)}</p>${x.lit ? `<p class="bnote">逐词直译：${esc(x.lit)}</p>` : ''}${x.secs ? `<p class="bnote">录到 ${esc(x.secs)} 秒${+x.secs < 1.2 ? '，很短，可能没录全' : ''}${WAVS.has(x) ? `\u3000<button class="lk" data-act="replay" data-i="${i}" style="color:var(--pri);padding:0">听录音</button>` : ''}</p>` : ''}${x.sure === false ? `<p class="unsure">机器可能没听准，最好请他再说一遍。${esc(x.note)}</p>` : (x.note ? `<p class="bnote">${esc(x.note)}</p>` : '')}</div>`;
     const p = x.p, ws = wordsOf(p);
     if (i !== active) return `<button class="bub me cmp" data-act="sel" data-i="${i}"><span class="bz">${esc(p.zh)}</span><span class="km" lang="km">${esc(p.km)}</span></button>`;
     return `<div class="bub me ph"><p class="who">我说${p.by ? '（' + esc(p.by) + '翻译）' : ''}${p.staff === 'ok' ? '<span class="tag">员工听懂过</span>' : ''}</p><p class="bz">${esc(p.zh)}</p>
@@ -729,28 +744,30 @@ function viewTr() {
       }
       p.uses = (p.uses || 0) + 1; p.last = Date.now(); p.k = k;
       await idb('phrases', 'readwrite', s => s.put(p, k));
-      if (at != null) log[at] = { t: 'me', p }; else log.push({ t: 'me', p });
+      if (at != null) log[at] = { t: 'me', p, at: Date.now() }; else log.push({ t: 'me', p, at: Date.now() });
       active = at != null ? at : log.length - 1;
       if (fresh) addDetail(p);
       pend = null; persist(); render();
       await say(p.km);
     } catch (e) { setErr('me', e); }
   }
+  const ctxOf = () => log.slice(-6).filter(x => x.at && Date.now() - x.at < 600000).map(x => x.t === 'me' ? '老板：' + x.p.zh + '（念给员工听的高棉语：' + x.p.km + '）' : '员工：' + x.km + '（意思：' + x.zh + '）').join('\n');   // 十分钟以内的最近几句，帮它弄清员工这句在接什么话
   async function sendKm(wav) {
     pend = { side: 'st', text: '正在听他说的话…' }; err = null; render();
     try {
+      const ctx = ctxOf();
       if (fastOn() && !useAz()) {   // 谷歌一步到位：边听边翻
-        const d = await hearKm(wav);
+        const d = await hearKm(wav, null, ctx);
         if (!d.km && !d.zh) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '录到 ' + wavSecs(wav) + ' 秒，模型说里面没有人在说话');
-        const x = { t: 'st', km: d.km, zh: d.zh || '（没翻出来）', sure: d.sure && !!d.zh, note: d.note, secs: wavSecs(wav) }; WAVS.set(x, wav);
+        const x = { t: 'st', km: d.km, zh: d.zh || '（没翻出来）', lit: d.zh ? d.lit : '', sure: d.sure && !!d.zh, note: d.note, secs: wavSecs(wav), at: Date.now() }; WAVS.set(x, wav);
         log.push(x); pend = null; persist(); render();
         return;
       }
       const r = await stt(wav, 'km-KH');
       if (!r.ok) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '接口返回：' + r.status);
       pend = { side: 'st', text: '正在翻成中文…', km: r.text }; render();
-      const j = await kmToZh(r.text);
-      log.push({ t: 'st', km: r.text, zh: j.zh, sure: j.sure, note: j.note }); pend = null; persist(); render();
+      const j = await kmToZh(r.text, ctx);
+      log.push({ t: 'st', km: r.text, zh: j.zh, lit: j.lit, sure: j.sure, note: j.note, at: Date.now() }); pend = null; persist(); render();
     } catch (e) { setErr('st', e); }
   }
   bindHold($('#hZh'), { error: e => setErr('me', e), cancel: () => { pend = null; render(); }, info: t => { pend = { side: 'me', text: t }; err = null; render(); }, done: async wav => {

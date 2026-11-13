@@ -293,17 +293,38 @@ const KEEP_MIC = location.protocol === 'file:' || !IS_IOS;
 const MIC = { audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
 const wavSecs = wav => ((wav.size - 44) / 32000).toFixed(1);
 const Rec = {
-  on: false,
+  on: false, micName: '', devId: '',
+  /* 打开麦克风。苹果电脑旁边有苹果手机时，系统会把手机当成麦克风来用（接通要一两秒，开头几个字录不上，手机还会一直被占着）。
+   * 所以电脑上发现用的是手机，而电脑自己有麦克风，就换成电脑自己的。 */
+  async pickDev() {   // 该用哪个麦克风：系统默认的不是手机就用默认的（返回空），是手机就挑电脑自己的
+    const all = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'audioinput' && d.label);
+    const phone = d => /iphone|ipad/i.test(d.label), def = all.find(d => d.deviceId === 'default');
+    const real = all.filter(d => d.deviceId !== 'default' && d.deviceId !== 'communications' && !phone(d));
+    if (!real.length || (def ? !phone(def) : !all.some(phone))) return '';
+    return (real.find(d => /macbook|built-?in|内建|内置/i.test(d.label)) || real[0]).deviceId;
+  },
+  async open() {
+    const get = id => navigator.mediaDevices.getUserMedia(id ? { audio: Object.assign({ deviceId: { exact: id } }, MIC.audio) } : MIC);
+    if (!IS_IOS && !this.devId) { try { this.devId = await this.pickDev(); } catch (e) { console.warn(e); } }   // 权限给过以后，开麦克风之前就能看出默认的是不是手机，直接绕开，不去惊动手机
+    let st;
+    try { st = await get(this.devId); } catch (e) { if (!this.devId) throw e; this.devId = ''; st = await get(''); }
+    const label = () => (st.getAudioTracks()[0] || {}).label || '';
+    if (!IS_IOS && /iphone|ipad/i.test(label())) {   // 第一次给权限之前看不到麦克风的名字，开了才知道是手机，这时再换
+      try { const id = await this.pickDev(); if (id) { const st2 = await get(id); st.getTracks().forEach(t => t.stop()); st = st2; this.devId = id; } } catch (e) { console.warn('换不成电脑自己的麦克风', e); }
+    }
+    this.micName = label();
+    return st;
+  },
   release() { clearTimeout(this.idle); if (this.on) return; try { if (this.stream) this.stream.getTracks().forEach(t => t.stop()); } catch (e) { console.warn(e); } this.stream = null; },
   async warm() {   // 权限以前给过的话，进页面就先把麦克风打开，按下立刻能录
     if (!KEEP_MIC || location.protocol === 'file:' || (this.stream && this.stream.active) || !navigator.mediaDevices || !navigator.permissions) return;
-    try { const st = await navigator.permissions.query({ name: 'microphone' }); if (st.state !== 'granted' || this.on || (this.stream && this.stream.active)) return; this.stream = await navigator.mediaDevices.getUserMedia(MIC); clearTimeout(this.idle); this.idle = setTimeout(() => this.release(), 120000); } catch (e) { console.warn(e); }
+    try { const st = await navigator.permissions.query({ name: 'microphone' }); if (st.state !== 'granted' || this.on || (this.stream && this.stream.active)) return; this.stream = await this.open(); clearTimeout(this.idle); this.idle = setTimeout(() => this.release(), 120000); } catch (e) { console.warn(e); }
   },
   async start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
       throw new AppErr('这个页面现在用不了麦克风', '手机上必须用 https 开头的网址打开才能录音。当前地址：' + location.origin);
     clearTimeout(this.idle);
-    try { if (!this.stream || !this.stream.active) this.stream = await navigator.mediaDevices.getUserMedia(MIC); }
+    try { if (!this.stream || !this.stream.active) this.stream = await this.open(); }
     catch (e) { throw new AppErr(e.name === 'NotAllowedError' ? '麦克风权限被拒绝了，到浏览器设置里允许这个网页用麦克风' : '打不开麦克风', e.name + ': ' + e.message); }
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC(); await this.ctx.resume();
@@ -360,7 +381,7 @@ function bindHold(btn, h) {
       return h.error(new AppErr(Date.now() - t0 > 800 ? '麦克风已经允许了。现在按住按钮说话，说完再松开。' : '要按住不放再说话，说完再松开。', ''));
     }
     Rec.onLevel = v => btn.style.setProperty('--lv', Math.min(1, v * 4).toFixed(2));
-    tRec = Date.now(); setRec(true); info('正在录音，说完松开。'); timer = setTimeout(end, 30000);
+    tRec = Date.now(); setRec(true); info('正在录音，说完松开。' + (Rec.micName ? '（麦克风：' + Rec.micName + '）' : '')); timer = setTimeout(end, 30000);
   }
   async function end() {
     if (!down) return; down = false; clearTimeout(timer);

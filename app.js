@@ -541,7 +541,15 @@ async function hearKm(wav, opt, ctx) {
   const [a, b] = await Promise.all([hearKm1(wav, opt), hearKm1(wav, opt, ctx).catch(() => null)]);
   if (!a.km || !a.zh || a.lang !== 'km') return a;
   if (b && b.zh && normKm(a.km) === normKm(b.km)) return b;
-  try { const j = await kmToZh(a.km, ctx); return Object.assign({}, a, { zh: j.zh, lit: j.lit, sure: a.sure && j.sure, note: [a.note, j.note].filter(Boolean).join(' ') }); } catch (e) { return a; }
+  const far = !!b && (!b.km || dice2(normKm(a.km), normKm(b.km)) < 0.5);   // 两遍听到的差得很远：多半没录到人声或者没听清，如实标出来
+  const warn = far ? '两遍听到的内容差得很远。' : '';
+  try { const j = await kmToZh(a.km, ctx); return Object.assign({}, a, { zh: j.zh, lit: j.lit, sure: a.sure && j.sure && !far, note: [warn, a.note, j.note].filter(Boolean).join(' ') }); } catch (e) { return Object.assign({}, a, { sure: a.sure && !far, note: [warn, a.note].filter(Boolean).join(' ') }); }
+}
+function dice2(x, y) {   // 两段文字有多像：0 完全不同，1 一样（按相邻两个字算）
+  const g = t => { const m = new Map(); for (let i = 0; i < t.length - 1; i++) { const k = t.slice(i, i + 2); m.set(k, (m.get(k) || 0) + 1); } return m; };
+  const A = g(x), B = g(y); let n = 0, ta = 0, tb = 0;
+  A.forEach((v, k) => { ta += v; n += Math.min(v, B.get(k) || 0); }); B.forEach(v => { tb += v; });
+  return ta + tb ? 2 * n / (ta + tb) : 0;
 }
 async function hearKm1(wav, opt, ctx) {   // 听高棉语录音，一步出高棉文和中文意思。ctx：刚才几句对话
   const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav, ctxTail(ctx)), '听和翻译', false, opt), '谷歌');
@@ -662,7 +670,7 @@ function go(tab) {
   stopAudio(); if (Rec.on) Rec.stop().catch(() => {});
   TAB = tab; document.querySelectorAll('#tabs button').forEach(b => b.setAttribute('aria-current', b.dataset.tab === tab));
   window.scrollTo(0, 0);
-  ({ tr: viewTr, game: viewGame, set: viewSet })[tab]();
+  ({ tr: viewTr, set: viewSet })[tab]();
 }
 $('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) go(b.dataset.tab); });
 function keyWarn() {
@@ -814,261 +822,12 @@ $('#showPlay').onclick = () => say(showKm).catch(console.warn);
 $('#showSlow').onclick = () => say(showKm, { slow: true }).catch(console.warn);
 $('#showClose').onclick = () => { stopAudio(); $('#show').classList.remove('on'); };
 
-/* ================= 功能二：闯关 ================= */
-const UNIT = {}; const ITEM = {};
-COURSE.forEach(u => { UNIT[u.id] = u; u.items.forEach(it => { it.words = it.w ? it.w.map(w => ({ km: w[0], ro: w[1], zh: w[2] })) : null; ITEM[it.km] = it; }); });
-const EARS = {}; EAR.forEach(e => EARS[e.id] = e);
-const REV_GAP = [1, 2, 4, 7, 15, 30];
-
-function nodeDone(n) { return n.t === 'unit' ? !!(S.units[n.id] && S.units[n.id].done) : n.t === 'ear' ? !!(S.ear[n.id] && S.ear[n.id].done) : !!(S.boss[n.id] && S.boss[n.id].pass); }
-function nodeOpen(i) {
-  const n = PATH[i];
-  if (n.t === 'boss') return n.units.every(u => S.units[u] && S.units[u].done);
-  for (let k = 0; k < i; k++) if (PATH[k].t !== 'boss' && !nodeDone(PATH[k])) return false;   // 真人验证关不卡后面的进度
-  return true;
-}
-function tickStreak() {
-  const t = day(); if (S.streak.last === t) return;
-  S.streak.days = S.streak.last === dayPlus(-1) ? S.streak.days + 1 : 1; S.streak.last = t; save();
-}
-function dueList() { const t = day(); return Object.keys(S.rev).filter(k => ITEM[k] && S.rev[k].due <= t); }
-function learnedItems() { const a = []; COURSE.forEach(u => { if (S.units[u.id] && S.units[u.id].done) a.push(...u.items); }); return a; }
-
-function viewGame() {
-  CUR = null;
-  const doneUnits = COURSE.filter(u => S.units[u.id] && S.units[u.id].done).length;
-  const streak = (S.streak.last === day() || S.streak.last === dayPlus(-1)) ? S.streak.days : 0;
-  const due = dueList().length, m = S.mission;
-  let unitNo = 0;
-  view.innerHTML = `${keyWarn()}<div id="msg"></div>
-    <div class="stat"><div><b>${streak}</b>连续学习天数</div><div><b>${doneUnits} / ${COURSE.length}</b>已过单元</div></div>
-    ${m && m.state === 'todo' ? `<div class="card"><p class="sub">今天的真人任务：找机会对本地人说一次</p><p class="big">${esc(m.zh)}</p><p class="km" lang="km" style="font-size:26px">${esc(m.km)}</p>
-      <div class="btns"><button class="b pri" data-act="mPlay">先听一遍</button><button class="b" data-act="mOk">说了，对方听懂了</button><button class="b" data-act="mNo">说了，没听懂</button></div></div>` : ''}
-    ${due ? `<button class="node open" data-act="review"><span class="n">${due}</span><span><b>今日复习</b><small>以前学过、今天该再听一遍的句子</small></span></button>` : ''}
-    <h2 class="h2">关卡</h2>
-    <ol class="path">${PATH.map((n, i) => {
-      const done = nodeDone(n), open = nodeOpen(i), cls = done ? 'done' : open ? 'open' : 'lock';
-      if (n.t === 'unit') { const u = UNIT[n.id]; unitNo++; return `<li><button class="node ${cls}" data-act="unit" data-id="${n.id}" ${open ? '' : 'disabled'}><span class="n">${done ? '✓' : unitNo}</span><span><b>${esc(u.title)}</b><small>${esc(u.sub)}</small></span></button></li>`; }
-      if (n.t === 'ear') { const e = EARS[n.id]; return `<li><button class="node ear ${cls}" data-act="ear" data-id="${n.id}" ${open ? '' : 'disabled'}><span class="n">${done ? '✓' : '耳'}</span><span><b>练耳朵：${esc(e.title)}</b><small>两个容易听混的音，听出是哪一个</small></span></button></li>`; }
-      const bs = S.boss[n.id];
-      return `<li><button class="node boss ${cls}" data-act="boss" data-id="${n.id}" ${open ? '' : 'disabled'}><span class="in"><span class="n">${done ? '✓' : '人'}</span><span><b>${esc(n.title)}</b><small>${bs ? (bs.pass ? '已通过 ' : '上次没过 ') + bs.at : open ? '找一位本地员工，把学过的句子说给他听' : '学完前面三个单元后开放'}</small></span></span></button></li>`;
-    }).join('')}</ol>
-    <button class="b ghost wide" data-act="legend">读音提示怎么看</button>`;
-  ACTS = {
-    toSet: () => go('set'),
-    unit: b => startUnit(UNIT[b.dataset.id]),
-    ear: b => startEar(EARS[b.dataset.id]),
-    boss: b => startBoss(PATH.find(n => n.id === b.dataset.id)),
-    review: () => startReview(),
-    legend: () => viewLegend(),
-    mPlay: () => say(m.km),
-    mOk: () => endMission('ok'), mNo: () => endMission('no')
-  };
-}
-function endMission(r) {
-  const m = S.mission; S.missionLog.push({ km: m.km, r, at: day() }); m.state = r;
-  if (r === 'no') S.rev[m.km] = { box: 0, due: day() };
-  tickStreak(); save(); viewGame();
-}
-function viewLegend() {
-  view.innerHTML = `<button class="back2" data-act="home">‹ 回关卡</button>
-    <div class="card flat"><p class="big">读音提示怎么看</p>
-    <div class="tips"><p>蓝色那行读音提示按汉语拼音读：b d g 不送气，p t k 送气，j q 和拼音一样。</p><p>它只是拐杖，写不出高棉语真正的声音。以听到的标准音为准，多用"慢速"和"逐词"。</p>
-    ${Object.values(TIPS).map(t => `<p>${esc(t)}</p>`).join('')}</div></div>`;
-  ACTS = { home: viewGame };
-}
-function prefetch(items) {
-  if (useAz() ? !S.set.azKey : !S.set.gKey) return;
-  items.reduce((p, it) => p.then(() => ttsBuf(it.km)).catch(e => console.warn('预取失败', it.km, e)), Promise.resolve());
-}
-function progHTML(n, on) { let s = '<div class="prog">'; for (let i = 0; i < n; i++) s += `<i class="${i < on ? 'on' : ''}"></i>`; return s + '</div>'; }
-function head(title, sub) { return `<button class="back2" data-act="home">‹ 回关卡</button><p class="big">${esc(title)}</p><p class="sub" style="margin-bottom:12px">${esc(sub)}</p>`; }
-
-/* --- 单元：学新句 → 听音选义 → 开口 --- */
-function startUnit(u) { prefetch(u.items); unitLearn(u, 0); }
-function unitLearn(u, i) {
-  const it = u.items[i]; CUR = it;
-  const tips = (it.tip || []).map(k => TIPS[k]).filter(Boolean);
-  view.innerHTML = `${head(u.title, '第一步：先听熟。每句多听几遍，听不清就用慢速和逐词。')}${progHTML(u.items.length, i + 1)}<div id="msg"></div>
-    ${cardHTML(it, tips.length ? `<div class="tips">${tips.map(t => `<p>${esc(t)}</p>`).join('')}</div>` : '')}
-    <div class="btns">${i > 0 ? '<button class="b" data-act="prev">上一句</button>' : ''}<button class="b blue" data-act="next" style="flex:1">${i < u.items.length - 1 ? '下一句' : '都听熟了，开始听音选义'}</button></div>`;
-  ACTS = { home: viewGame, prev: () => unitLearn(u, i - 1),
-    next: () => i < u.items.length - 1 ? unitLearn(u, i + 1) : runQuiz({ title: u.title, sub: '第二步：只听声音，选出意思。连续答对才算过，答错从头数。', items: u.items, pool: u.items, need: Math.min(u.items.length, 10), back: () => unitLearn(u, 0), done: () => unitSpeak(u) }) };
-  say(it.km).catch(showErr);
-}
-
-/* 听音选义。need 有值 = 要连续答对 need 题；没有 = 每句过一遍（复习用） */
-function runQuiz(o) {
-  let combo = 0, queue = [], last = null, idx = 0; const results = {};
-  const fill = () => { let s = shuffle(o.items); if (s.length > 1 && s[0] === last) s.push(s.shift()); queue.push(...s); };
-  if (!o.need) queue.push(...o.items);
-  function ask() {
-    if (o.need) { if (!queue.length) fill(); } else if (!queue.length) return o.done(results);
-    const it = queue.shift(); last = it; idx++; CUR = null; window.__km.q = it;
-    const others = shuffle(o.pool.filter(x => x.zh !== it.zh)).slice(0, 3);
-    const opts = shuffle([it, ...others]);
-    view.innerHTML = `${head(o.title, o.sub)}${o.need ? progHTML(o.need, combo) : `<p class="sub">还剩 ${queue.length + 1} 句</p>`}<div id="msg"></div>
-      <div class="card"><p class="sub">听到的是哪个意思？</p><div class="btns"><button class="b pri" data-act="again">再听一遍</button><button class="b" data-act="slowq">慢速</button></div>
-      <div class="opts">${opts.map((x, k) => `<button class="b" data-act="pick" data-k="${k}">${esc(x.zh)}</button>`).join('')}</div><div id="after"></div></div>`;
-    let answered = false;
-    ACTS = { home: viewGame, again: () => say(it.km), slowq: () => say(it.km, { slow: true }),
-      pick: b => {
-        if (answered) return; answered = true;
-        const right = opts[+b.dataset.k] === it;
-        view.querySelectorAll('.opts .b').forEach((el, k) => { el.disabled = true; if (opts[k] === it) el.classList.add('ok'); });
-        if (!right) b.classList.add('bad');
-        if (!(it.km in results)) results[it.km] = right;
-        if (right) { combo++; if (o.need && combo >= o.need) { tickStreak(); return setTimeout(() => o.done(results), 600); } return setTimeout(ask, 650); }
-        combo = 0; if (o.need) queue.splice(Math.min(2, queue.length), 0, it);
-        CUR = it;
-        $('#after').innerHTML = `<div class="verdict no"><b>是这句：${esc(it.zh)}</b><p class="km" lang="km" style="font-size:28px">${esc(it.km)}</p><p class="sub">${esc(it.ro)}</p>${o.need ? '<p class="sub">连对数清零，这句等会儿还会再出现。</p>' : ''}
-          <div class="btns"><button class="b" data-act="again">再听</button><button class="b" data-act="slowq">慢速</button><button class="b blue" data-act="cont">继续</button></div></div>`;
-      },
-      cont: ask };
-    say(it.km).catch(showErr);
-  }
-  ask();
-}
-
-/* 开口：录音 → 微软高棉语听写 → 只判断"机器能不能听懂"，不打分 */
-function judge(it, r) {
-  const T = normKm(it.km), alts = r.alts.map(normKm);
-  if (alts.includes(T)) return { level: 'ok' };
-  const ws = wordsOf(it), heard = alts[0] || '';
-  const hits = ws.map(w => heard.includes(normKm(w.km)));
-  return { level: hits.some(Boolean) ? 'part' : 'no', hits, ws };
-}
-function speakPick(u) { const multi = u.items.filter(it => it.words && !/ៗ/.test(it.km)); return (multi.length >= 3 ? multi : u.items.filter(it => !/ៗ/.test(it.km))).slice().sort((a, b) => b.km.length - a.km.length).slice(0, 5); }
-function unitSpeak(u) {
-  const list = speakPick(u), res = {};
-  const IDLE = '按住<br>说高棉语';
-  function step(i) {
-    if (i >= list.length) return unitDone(u, res);
-    const it = list[i]; CUR = it;
-    view.innerHTML = `${head(u.title, '第三步：开口。先听标准音，再自己说。这里只看机器能不能听懂你，不打分。')}${progHTML(list.length, i + 1)}
-      ${cardHTML(it)}<section class="talk"><button class="mic" id="recBtn">${IDLE}</button><p class="st" id="st"></p></section><div id="msg"></div><div id="after"></div>
-      <button class="b wide" data-act="skip">${i < list.length - 1 ? '下一句' : '完成'}</button>
-      <p class="sub" style="margin-top:10px">机器听写不是百分之百准。它没听懂不一定是你说错，拿不准的留到"真人验证"让员工来判断。</p>`;
-    ACTS = { home: viewGame,
-      skip: () => { if (!res[it.km]) res[it.km] = 'skip'; step(i + 1); }
-    };
-    bindHold($('#recBtn'), { error: e => { $('#st').textContent = ''; showErr(e); }, info: t => { $('#st').textContent = t; }, done: async wav => {
-        $('#st').textContent = '机器正在听…';
-        const r = await stt(wav, 'km-KH'); $('#st').textContent = '';
-        if (!r.ok) { if (res[it.km] !== 'ok') res[it.km] = 'no'; $('#after').innerHTML = `<div class="verdict no"><b>机器没听出高棉语</b><p class="sub">离手机近一点、周围安静一点，再说一次。（接口返回：${esc(r.status)}）</p></div>`; return; }
-        const v = judge(it, r);
-        if (v.level === 'ok' || res[it.km] !== 'ok') res[it.km] = v.level;
-        $('#after').innerHTML = v.level === 'ok'
-          ? `<div class="verdict ok"><b>机器听懂了</b><p class="sub">它听到的和这句一字不差。</p></div>`
-          : `<div class="verdict ${v.level}"><b>${v.level === 'part' ? '机器只听懂了一部分' : '机器没听懂'}</b><p>机器听成了：<span class="km" lang="km" style="font-size:22px">${esc(r.text)}</span></p>
-             ${v.ws.length > 1 ? `<p class="sub">听出来的词：${v.ws.filter((w, k) => v.hits[k]).map(w => esc(w.zh)).join('、') || '无'}；没听出来的：${v.ws.filter((w, k) => !v.hits[k]).map(w => esc(w.zh)).join('、')}</p>` : ''}
-             <p class="sub">点上面的"慢速"或没听出来的那个词，对着再练，然后重录。</p></div>`;
-      } });
-  }
-  step(0);
-}
-function unitDone(u, res) {
-  const first = !(S.units[u.id] && S.units[u.id].done);
-  S.units[u.id] = { done: true, at: day(), speak: res };
-  u.items.forEach(it => { if (!S.rev[it.km]) S.rev[it.km] = { box: 0, due: dayPlus(1) }; });
-  const cand = u.items.filter(it => it.words); const pick = cand.length ? cand[Math.floor(Math.random() * cand.length)] : u.items[0];
-  if (first || !S.mission || S.mission.state !== 'todo') S.mission = { km: pick.km, zh: pick.zh, state: 'todo', at: day() };
-  tickStreak(); save();
-  const vals = Object.values(res), ok = vals.filter(v => v === 'ok').length;
-  CUR = ITEM[S.mission.km];
-  view.innerHTML = `<div class="card"><p class="big">「${esc(u.title)}」过关</p>
-    <p>听音选义：连续答对，已通过。</p><p>开口：${vals.length} 句里机器听懂了 ${ok} 句。</p>
-    <p class="sub" style="margin-top:8px">这些句子明天会出现在"今日复习"里。</p></div>
-    <div class="card"><p class="sub">真人任务：找机会对本地人说一次</p><p class="big">${esc(S.mission.zh)}</p><p class="km" lang="km" style="font-size:28px">${esc(S.mission.km)}</p>
-    <div class="btns"><button class="b pri" data-act="play">听一遍</button><button class="b" data-act="slow">慢速</button></div></div><div id="msg"></div>
-    <button class="b blue wide" data-act="home">回关卡</button>`;
-  ACTS = { home: viewGame };
-}
-
-/* --- 练耳朵 --- */
-function startEar(e) {
-  const NEED = 6;
-  function compare(i) {
-    if (i >= e.pairs.length) { S.ear[e.id] = { done: true, at: day() }; tickStreak(); save(); return viewGame(); }
-    const p = e.pairs[i]; CUR = null;
-    const side = (x, k) => `<div class="card"><p class="km" lang="km">${esc(x[0])}</p><p class="ro" style="color:var(--blue);font-weight:600">${esc(x[1])}</p><p>${esc(x[2])}</p><div class="btns" style="justify-content:center"><button class="b pri" data-act="p${k}">听</button><button class="b" data-act="s${k}">慢</button></div></div>`;
-    view.innerHTML = `${head('练耳朵：' + e.title, `第 ${i + 1} / ${e.pairs.length} 组。先两边来回听，听出差别再开始测。`)}<div id="msg"></div>
-      <div class="pair">${side(p.a, 'a')}${side(p.b, 'b')}</div><div class="tips" style="margin:14px 0">${esc(p.focus)}</div>
-      <button class="b blue wide" data-act="test">听出差别了，开始测</button>`;
-    ACTS = { home: viewGame, pa: () => say(p.a[0]), pb: () => say(p.b[0]), sa: () => say(p.a[0], { slow: true }), sb: () => say(p.b[0], { slow: true }), test: () => test(i, 0) };
-    ttsBuf(p.a[0]).catch(showErr); ttsBuf(p.b[0]).catch(() => {});
-  }
-  function test(i, combo) {
-    const p = e.pairs[i], ans = Math.random() < 0.5 ? 'a' : 'b'; let answered = false; window.__km.q = ans;
-    view.innerHTML = `${head('练耳朵：' + e.title, `连续听对 ${NEED} 次过关，听错从头数。`)}${progHTML(NEED, combo)}<div id="msg"></div>
-      <div class="card"><p class="sub">刚才播的是哪一个？</p><div class="btns"><button class="b pri" data-act="again">再听一遍</button></div>
-      <div class="opts two">${['a', 'b'].map(k => `<button class="b" data-act="pick" data-k="${k}"><span class="km" lang="km">${esc(p[k][0])}</span>${esc(p[k][2])}</button>`).join('')}</div><div id="after"></div></div>`;
-    ACTS = { home: viewGame, again: () => say(p[ans][0]),
-      pa: () => say(p.a[0]), pb: () => say(p.b[0]),
-      pick: b => {
-        if (answered) return; answered = true;
-        const right = b.dataset.k === ans;
-        view.querySelectorAll('.opts .b').forEach(el => { el.disabled = true; if (el.dataset.k === ans) el.classList.add('ok'); });
-        if (right) { if (combo + 1 >= NEED) return setTimeout(() => compare(i + 1), 600); return setTimeout(() => test(i, combo + 1), 600); }
-        b.classList.add('bad');
-        $('#after').innerHTML = `<div class="verdict no"><b>播的是「${esc(p[ans][2])}」</b><p class="sub">${esc(p.focus)}</p>
-          <div class="btns"><button class="b" data-act="pa">听「${esc(p.a[2])}」</button><button class="b" data-act="pb">听「${esc(p.b[2])}」</button><button class="b blue" data-act="cont">重新数</button></div></div>`;
-      },
-      cont: () => test(i, 0) };
-    say(p[ans][0]).catch(showErr);
-  }
-  compare(0);
-}
-
-/* --- 真人验证 --- */
-function startBoss(n) {
-  let pool = []; n.units.forEach(id => pool.push(...UNIT[id].items.filter(it => it.words)));
-  const list = shuffle(pool).slice(0, 5), res = [];
-  function intro() {
-    view.innerHTML = `${head(n.title, '这一关由真人来判，机器不参与。')}
-      <div class="card"><p>找一位本地员工或者任何本地人。</p><p>下面 5 句话，每句你<b>自己开口说</b>给他听，不要放录音。看他的反应或者让他照做，再按结果。</p>
-      <p class="sub" style="margin-top:8px">5 句里有 4 句被听懂算通过。如果他说某句话本身就不对、本地人不这么说，按"这句话本身不对"，我会记下来。</p></div>
-      <button class="b blue wide" data-act="go">人找到了，开始</button>`;
-    ACTS = { home: viewGame, go: () => step(0) };
-  }
-  function step(i) {
-    if (i >= list.length) return finish();
-    const it = list[i]; CUR = it;
-    view.innerHTML = `${head(n.title, `第 ${i + 1} / ${list.length} 句。可以先自己听一遍，再开口说给他听。`)}${progHTML(list.length, i + 1)}<div id="msg"></div>${cardHTML(it)}
-      <div class="opts"><button class="b ok" data-act="r" data-r="ok">他听懂了</button><button class="b" data-act="r" data-r="no">他没听懂</button><button class="b" data-act="r" data-r="bad">他说这句话本身不对</button></div>`;
-    ACTS = { home: viewGame, r: b => { res.push({ km: it.km, r: b.dataset.r }); if (b.dataset.r === 'bad') S.flags[it.km] = { zh: it.zh, at: day() }; if (b.dataset.r === 'no') S.rev[it.km] = { box: 0, due: day() }; save(); stopAudio(); step(i + 1); } };
-  }
-  function finish() {
-    const ok = res.filter(x => x.r === 'ok').length, bad = res.filter(x => x.r === 'bad').length, pass = ok >= 4;
-    S.boss[n.id] = { pass: pass || !!(S.boss[n.id] && S.boss[n.id].pass), at: day(), res }; tickStreak(); save();
-    view.innerHTML = `<div class="card"><p class="big">${pass ? '真人验证通过' : '这次没过'}</p><p>${res.length} 句里他听懂了 ${ok} 句。</p>
-      ${res.some(x => x.r === 'no') ? '<p class="sub">没听懂的句子已经放进"今日复习"。</p>' : ''}${bad ? `<p class="sub">有 ${bad} 句被指出本身不对，记在"设置"最下面，把它告诉 Claude 来改课程。</p>` : ''}</div>
-      <button class="b blue wide" data-act="home">回关卡</button>`;
-    ACTS = { home: viewGame };
-  }
-  intro();
-}
-
-/* --- 今日复习 --- */
-function startReview() {
-  const items = shuffle(dueList()).slice(0, 12).map(k => ITEM[k]);
-  const pool = learnedItems(); prefetch(items);
-  runQuiz({ title: '今日复习', sub: '只听声音，选出意思。答对的隔几天再考，答错的明天再来。', items, pool: pool.length >= 4 ? pool : COURSE[0].items,
-    done: results => {
-      let ok = 0;
-      Object.keys(results).forEach(k => { const r = S.rev[k] || { box: 0 }; if (results[k]) { ok++; r.box = Math.min(r.box + 1, REV_GAP.length - 1); r.due = dayPlus(REV_GAP[r.box]); } else { r.box = 0; r.due = dayPlus(1); } S.rev[k] = r; });
-      tickStreak(); save();
-      view.innerHTML = `<div class="card"><p class="big">复习完了</p><p>${Object.keys(results).length} 句里第一次就听对 ${ok} 句。</p></div><button class="b blue wide" data-act="home">回关卡</button>`;
-      ACTS = { home: viewGame };
-    } });
-}
-
 /* ================= 设置 ================= */
 async function viewSet() {
   CUR = null;
   let nAudio = '?', nPhr = '?';
   try { nAudio = await idb('audio', 'readonly', s => s.count()); nPhr = await idb('phrases', 'readonly', s => s.count()); } catch (e) { console.warn(e); }
-  const flags = Object.keys(S.flags), az = useAz();
+  const az = useAz();
   const opt = (id, list) => `<select id="${id}">${list.map(m => `<option value="${m[0]}" ${S.set[id] === m[0] ? 'selected' : ''}>${m[1]}</option>`).join('')}</select>`;
   const HOLD = 'style="touch-action:none;user-select:none;-webkit-user-select:none"';
   view.innerHTML = `<div id="msg"></div>
@@ -1102,9 +861,7 @@ async function viewSet() {
     <div class="card flat"><p class="big">固定说法表</p><p class="sub">表里的词，翻译时一律照这里的说法。只在某个词真让员工听不懂或者误会时才加，个人说话习惯不用加。</p>
       <ul class="list" id="glossList" style="margin-top:10px">${(S.gloss || []).map((g, i) => `<li><span class="main"><span>${esc(g.zh)}</span><span class="km" lang="km">${esc(g.km)}</span></span><button class="x" data-act="gPlay" data-i="${i}">听</button><button class="x" data-act="gDel" data-i="${i}">删除</button></li>`).join('') || '<li class="sub">表是空的。</li>'}</ul>
       <div class="btns"><button class="b" data-act="gAdd">加一条</button></div><div id="gBox"></div></div>
-    <div class="card flat"><p class="big">手机里存的东西</p><p>已存声音 ${nAudio} 段，常用句 ${nPhr} 句。</p>
-      <div class="btns"><button class="b" data-act="dl">预先下载全部课程发音</button><button class="b ghost" data-act="wipe">清掉学习进度</button></div><div class="res" id="dlRes"></div></div>
-    <div class="card flat"><p class="big">被本地人指出不对的句子</p>${flags.length ? `<ul class="list">${flags.map(k => `<li><span class="main"><span>${esc(S.flags[k].zh)}</span><span class="km" lang="km">${esc(k)}</span></span><span class="sub">${esc(S.flags[k].at)}</span></li>`).join('')}</ul><p class="sub">把这几句发给 Claude，让它改课程。</p>` : '<p class="sub">还没有。真人验证时按"这句话本身不对"会记到这里。</p>'}</div>`;
+    <div class="card flat"><p class="big">手机里存的东西</p><p>已存声音 ${nAudio} 段，常用句 ${nPhr} 句。</p></div>`;
   ['gKey', 'trEngine', 'clKey', 'model', 'voice', 'voiceF', 'voiceM', 'theme', 'speech', 'azKey', 'azRegion'].forEach(id => { const el = $('#' + id); if (!el) return;
     el.addEventListener('change', e => { S.set[id] = e.target.value.trim(); if (id === 'voiceF' || id === 'voiceM') S.set.voiceNote = ''; save(); applyTheme(); if (id === 'speech') viewSet(); }); });
   const out = (el, ok, t) => { const r = $(el); r.className = 'res ' + (ok ? 'ok' : 'bad'); r.textContent = t; };
@@ -1176,14 +933,6 @@ async function viewSet() {
     cmpPlay: b => say(cmp[+b.dataset.i].p.km), cmpSlow: b => say(cmp[+b.dataset.i].p.km, { slow: true }),
     tTts: async () => { out('#tRes', true, '正在请求…'); try { const b = await ttsFetch('សួស្តី', S.set.voice, false); out('#tRes', !S.set.voiceNote, (S.set.voiceNote ? S.set.voiceNote + '\u3000' : '') + '发音正常，收到 ' + b.byteLength + ' 字节的声音，正在播放。'); await playBuf(b); } catch (e) { fail(e); } },
     tCl: async () => { out('#tRes', true, '正在请求…'); try { const p = await translate('你好'); out('#tRes', true, engineName() + '翻译正常：你好 → ' + p.km + '（' + p.ro + '）'); } catch (e) { fail(e); } },
-    dl: async b => {
-      b.disabled = true; const all = []; COURSE.forEach(u => u.items.forEach(it => all.push(it.km))); EAR.forEach(e => e.pairs.forEach(p => all.push(p.a[0], p.b[0])));
-      const uniq = [...new Set(all)]; let n = 0, bad = 0, lastErr = null;
-      for (const t of uniq) { for (const slow of (useAz() ? [false, true] : [false])) { try { await ttsBuf(t, S.set.voice, slow); } catch (e) { bad++; lastErr = e; if (bad >= 3) break; } } if (bad >= 3) break; n++; out('#dlRes', true, `已下载 ${n} / ${uniq.length} 句`); }
-      if (lastErr) out('#dlRes', false, `下载中断，成功 ${n} 句。原因：${lastErr.zh || lastErr}\u3000${lastErr.detail || ''}`); else out('#dlRes', true, `全部 ${uniq.length} 句的${S.set.voice === 'f' ? '女声' : '男声'}发音都已存进手机。`);
-      b.disabled = false;
-    },
-    wipe: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次，确定清掉'; return; } const set = S.set, log = S.log, gloss = S.gloss; S = defState(); S.set = set; S.log = log; S.gloss = gloss; save(); viewSet(); },
     gPlay: b => say(S.gloss[+b.dataset.i].km),
     gDel: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次删除'; return; } S.gloss.splice(+b.dataset.i, 1); save(); viewSet(); },
     gAdd: () => wordCapture($('#gBox'), { zh: '', old: '', done: () => viewSet() }),

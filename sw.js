@@ -1,6 +1,6 @@
 /* 离线缓存：有网时总是拿最新的程序文件，同时存一份在手机里；没网或网太慢时用存下来的那份 */
-const CACHE = 'km-shell-v2';
-const FILES = ['./', 'index.html', 'app.js', 'course.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-180.png'];
+const CACHE = 'km-shell-v3';
+const FILES = ['./', 'index.html', 'app.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png', 'icon-180.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener('fetch', e => {

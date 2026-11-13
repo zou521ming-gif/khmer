@@ -190,9 +190,9 @@ async function gStt(wav, lang) {
 }
 /* 通用型号（翻译、边听边翻）：走 generateContent 接口，思考档位调到"低"。
  * 2026-11-13 用真密钥实测：同一句话走新的 interactions 接口要 5~35 秒，走这个接口 2~3 秒；默认档位会先"想"一千多字，又慢又多花钱。 */
-async function gGen(system, parts, what, emptyOk) {
-  const path = 'models/' + S.set.gModel + ':generateContent';
-  const body = { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts }], generationConfig: { thinkingConfig: { thinkingLevel: 'low' } } };
+async function gGen(system, parts, what, emptyOk, opt) {
+  const path = 'models/' + ((opt && opt.model) || S.set.gModel) + ':generateContent';
+  const body = { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts }], generationConfig: { thinkingConfig: { thinkingLevel: (opt && opt.level) || 'low' } } };
   let j;
   try { j = await gPost(path, body, what); }
   catch (e) { if (e.http !== 400 || !/thinking/i.test(e.raw || '')) throw e; delete body.generationConfig; j = await gPost(path, body, what); }   // 这个型号不认"思考档位"就不带
@@ -286,13 +286,24 @@ async function sayWords(words, onWord) {
 
 /* ---------- 录音：直接取原始声波，转成 16k 的 WAV，苹果安卓都一样 ---------- */
 /* 直接双击文件打开时（地址以 file: 开头），Chrome 记不住麦克风授权，每次都会重新问。所以这种情况下麦克风开着不关，只问一次 */
-const KEEP_MIC = location.protocol === 'file:';
+/* 2026-11-13：每按一次都重新打开麦克风要等零点几秒到一秒多，员工一按就开口，开头几个字录不进去，听出来的就是半句。
+ * 所以麦克风开一次就留着（两分钟不用或者切到别的窗口再关）。苹果手机例外：麦克风一直开着会让手机放出来的声音变小，所以苹果手机还是每次现开。 */
+const IS_IOS = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const KEEP_MIC = location.protocol === 'file:' || !IS_IOS;
+const MIC = { audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
+const wavSecs = wav => ((wav.size - 44) / 32000).toFixed(1);
 const Rec = {
   on: false,
+  release() { clearTimeout(this.idle); if (this.on) return; try { if (this.stream) this.stream.getTracks().forEach(t => t.stop()); } catch (e) { console.warn(e); } this.stream = null; },
+  async warm() {   // 权限以前给过的话，进页面就先把麦克风打开，按下立刻能录
+    if (!KEEP_MIC || location.protocol === 'file:' || (this.stream && this.stream.active) || !navigator.mediaDevices || !navigator.permissions) return;
+    try { const st = await navigator.permissions.query({ name: 'microphone' }); if (st.state !== 'granted' || this.on || (this.stream && this.stream.active)) return; this.stream = await navigator.mediaDevices.getUserMedia(MIC); clearTimeout(this.idle); this.idle = setTimeout(() => this.release(), 120000); } catch (e) { console.warn(e); }
+  },
   async start() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
       throw new AppErr('这个页面现在用不了麦克风', '手机上必须用 https 开头的网址打开才能录音。当前地址：' + location.origin);
-    try { if (!this.stream || !this.stream.active) this.stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } }); }
+    clearTimeout(this.idle);
+    try { if (!this.stream || !this.stream.active) this.stream = await navigator.mediaDevices.getUserMedia(MIC); }
     catch (e) { throw new AppErr(e.name === 'NotAllowedError' ? '麦克风权限被拒绝了，到浏览器设置里允许这个网页用麦克风' : '打不开麦克风', e.name + ': ' + e.message); }
     const AC = window.AudioContext || window.webkitAudioContext;
     this.ctx = new AC(); await this.ctx.resume();
@@ -307,7 +318,7 @@ const Rec = {
     if (!this.on) return null;
     this.on = false; this.onLevel = null;
     const rate = this.ctx.sampleRate, chunks = this.chunks;
-    try { this.proc.disconnect(); this.node.disconnect(); if (!KEEP_MIC) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; } await this.ctx.close(); } catch (e) { console.warn(e); }
+    try { this.proc.disconnect(); this.node.disconnect(); if (!KEEP_MIC) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; } else if (location.protocol !== 'file:') { clearTimeout(this.idle); this.idle = setTimeout(() => this.release(), 120000); } await this.ctx.close(); } catch (e) { console.warn(e); }
     let n = 0; chunks.forEach(c => n += c.length);
     const all = new Float32Array(n); let o = 0; chunks.forEach(c => { all.set(c, o); o += c.length; });
     const ratio = rate / 16000, outN = Math.floor(n / ratio), pcm = new Int16Array(outN);
@@ -327,9 +338,10 @@ const Rec = {
     return new Blob([h, pcm], { type: 'audio/wav' });
   }
 };
+document.addEventListener('visibilitychange', () => { if (document.hidden && location.protocol !== 'file:') Rec.release(); });
 /* 按住说话：按下开始录，松开结束。h.done(wav) 处理录音，h.error(e) 显示原因 */
 function bindHold(btn, h) {
-  let down = false, starting = false, timer = null;
+  let down = false, starting = false, timer = null, tRec = 0;
   const info = t => { if (h.info) h.info(t); };
   const setRec = on => { btn.classList.toggle('rec', on); btn.classList.remove('arming'); if (!on) btn.style.removeProperty('--lv'); };
   async function start(e) {
@@ -348,11 +360,12 @@ function bindHold(btn, h) {
       return h.error(new AppErr(Date.now() - t0 > 800 ? '麦克风已经允许了。现在按住按钮说话，说完再松开。' : '要按住不放再说话，说完再松开。', ''));
     }
     Rec.onLevel = v => btn.style.setProperty('--lv', Math.min(1, v * 4).toFixed(2));
-    setRec(true); info('正在录音，说完松开。'); timer = setTimeout(end, 30000);
+    tRec = Date.now(); setRec(true); info('正在录音，说完松开。'); timer = setTimeout(end, 30000);
   }
   async function end() {
     if (!down) return; down = false; clearTimeout(timer);
     if (starting) return;
+    if (Date.now() - tRec >= 350) await sleep(250);   // 松手后再多录四分之一秒，免得最后一个字被切掉
     setRec(false);
     try { const wav = await Rec.stop(); if (wav) await h.done(wav); } catch (err) { h.error(err); }
   }
@@ -476,8 +489,8 @@ async function hearZh(wav) {   // 听中文录音，一步出中文原话和高�
   const j = jsonOf(await gGen(sysZhAudio(), await audioParts(wav), '听和翻译'), '谷歌');
   return { zh: String(j.zh || '').trim(), km: String(j.km || j.draft || '').trim() };
 }
-async function hearKm(wav) {   // 听高棉语录音，一步出高棉文和中文意思
-  const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav), '听和翻译'), '谷歌');
+async function hearKm(wav, opt) {   // 听高棉语录音，一步出高棉文和中文意思
+  const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav), '听和翻译', false, opt), '谷歌');
   return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), sure: j.sure !== false, note: String(j.note || '') };
 }
 async function fillDetail(p) {
@@ -528,6 +541,7 @@ function wordCapture(box, o) {   // o: { zh 中文词, old 原来的说法, done
   draw('');
 }
 const LOADING = new WeakSet(); let trRefresh = null;
+const WAVS = new WeakMap();   // 员工说的那几句的录音，只留在内存里，给"听录音"用
 function addDetail(p) {   // 不挡着出声：后台补逐词和读音，补好了刷新一下翻译页
   if (LOADING.has(p)) return;
   LOADING.add(p);
@@ -623,6 +637,7 @@ function viewTr() {
       </div>
     </div></div>`;
   const chat = $('#chat');
+  Rec.warm();
   const fit = () => { chat.style.paddingBottom = (view.querySelector('.dock').offsetHeight + 24) + 'px'; };   // 底下那块有多高，对话就让出多高，免得最后一个气泡的按钮被挡住
   const addrSel = $('#addrSel');
   const paintAddr = () => { const on = !!S.set.addr; addrSel.style.background = on ? 'var(--pri)' : ''; addrSel.style.color = on ? '#fff' : ''; };   // 选了称呼就变蓝，提醒现在每句都会带称呼
@@ -631,7 +646,7 @@ function viewTr() {
   const persist = () => { S.log = log.slice(-40); save(); };
   const setErr = (side, e) => { console.error(e); pend = null; err = { side, zh: e instanceof AppErr ? e.zh : '程序出错了', detail: e instanceof AppErr ? e.detail : String(e && (e.stack || e.message) || e) }; render(); };
   function bubble(x, i) {
-    if (x.t === 'st') return `<div class="bub st"><p class="who">员工说</p><p class="km" lang="km">${esc(x.km)}</p><p class="bz">${esc(x.zh)}</p>${x.sure === false ? `<p class="unsure">机器可能没听准，最好请他再说一遍。${esc(x.note)}</p>` : (x.note ? `<p class="bnote">${esc(x.note)}</p>` : '')}</div>`;
+    if (x.t === 'st') return `<div class="bub st"><p class="who">员工说</p><p class="km" lang="km">${esc(x.km)}</p><p class="bz">${esc(x.zh)}</p>${x.secs ? `<p class="bnote">录到 ${esc(x.secs)} 秒${+x.secs < 1.2 ? '，很短，可能没录全' : ''}${WAVS.has(x) ? `\u3000<button class="lk" data-act="replay" data-i="${i}" style="color:var(--pri);padding:0">听录音</button>` : ''}</p>` : ''}${x.sure === false ? `<p class="unsure">机器可能没听准，最好请他再说一遍。${esc(x.note)}</p>` : (x.note ? `<p class="bnote">${esc(x.note)}</p>` : '')}</div>`;
     const p = x.p, ws = wordsOf(p);
     if (i !== active) return `<button class="bub me cmp" data-act="sel" data-i="${i}"><span class="bz">${esc(p.zh)}</span><span class="km" lang="km">${esc(p.km)}</span></button>`;
     return `<div class="bub me ph"><p class="who">我说${p.by ? '（' + esc(p.by) + '翻译）' : ''}${p.staff === 'ok' ? '<span class="tag">员工听懂过</span>' : ''}</p><p class="bz">${esc(p.zh)}</p>
@@ -676,8 +691,9 @@ function viewTr() {
     try {
       if (fastOn() && !useAz()) {   // 谷歌一步到位：边听边翻
         const d = await hearKm(wav);
-        if (!d.km && !d.zh) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '');
-        log.push({ t: 'st', km: d.km, zh: d.zh || '（没翻出来）', sure: d.sure && !!d.zh, note: d.note }); pend = null; persist(); render();
+        if (!d.km && !d.zh) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '录到 ' + wavSecs(wav) + ' 秒');
+        const x = { t: 'st', km: d.km, zh: d.zh || '（没翻出来）', sure: d.sure && !!d.zh, note: d.note, secs: wavSecs(wav) }; WAVS.set(x, wav);
+        log.push(x); pend = null; persist(); render();
         return;
       }
       const r = await stt(wav, 'km-KH');
@@ -704,6 +720,7 @@ function viewTr() {
     staffOk: async () => { CUR.staff = 'ok'; await idb('phrases', 'readwrite', s => s.put(CUR, CUR.k || normZh(CUR.zh))); persist(); render(); },
     retry: () => sendZh(CUR.zh, CUR.km, active),
     detail: () => { addDetail(CUR); render(); },
+    replay: async b => { const w = WAVS.get(log[+b.dataset.i]); if (w) await playBuf(await w.arrayBuffer()); },
     fixWord: b => { const w = wordsOf(CUR)[+b.dataset.i], p = CUR, at = active; stopAudio();
       wordCapture($('#fixBox'), { zh: w.zh, old: w.km, done: () => { p.staff = null; sendZh(p.zh, null, at); } }); },
     kb: () => { const f = $('#typed'); f.hidden = !f.hidden; fit(); if (!f.hidden) $('#zhIn').focus(); },
@@ -1010,6 +1027,9 @@ async function viewSet() {
     <div class="card flat"><p class="big">逐项测试</p><p class="sub">每一项都是真的去调一次接口，失败会显示服务器返回的原话。</p>
       <div class="btns"><button class="b pri" data-act="tTts">测发音</button><button class="b" data-act="tCl">测翻译</button><button class="b" id="tSttBtn" ${HOLD}>测听写（按住说一句中文）</button><button class="b" id="tKmBtn" ${HOLD}>测高棉语听写（请员工按住说一句）</button></div>
       <div class="res" id="tRes"></div></div>
+    <div class="card flat"><p class="big">听高棉语对比</p><p class="sub">员工说的话听不准时用。请员工按住下面的按钮说一句高棉语，同一段录音会同时交给四种听法，结果并排列出来，请员工看哪一种写对了。四种一起跑，会多花一点接口费用。</p>
+      <div class="btns"><button class="b pri" id="hcBtn" ${HOLD}>请员工按住说一句高棉语</button><button class="b" data-act="hcPlay" id="hcPlay" hidden>听录音</button></div>
+      <div class="res" id="hcSt"></div><div id="hcRes"></div></div>
     <div class="card flat"><p class="big">两家翻译对比</p><p class="sub">同一句中文让谷歌和 Claude 各翻一次，放给本地人听，看谁翻得对。哪家的密钥没填就只出另一家。</p>
       <form class="typed" id="cmp" style="margin-top:10px"><input id="cmpIn" placeholder="打一句你平时会说的中文" autocomplete="off"><button class="b pri">对比</button></form><div id="cmpRes"></div></div>
     <div class="card flat"><p class="big">固定说法表</p><p class="sub">表里的词，翻译时一律照这里的说法。只在某个词真让员工听不懂或者误会时才加，个人说话习惯不用加。</p>
@@ -1024,6 +1044,25 @@ async function viewSet() {
   const fail = e => out('#tRes', false, (e.zh || '出错') + (e.detail ? '\u3000' + e.detail : (e.zh ? '' : '\u3000' + String(e))));
   const holdTest = (id, lang, what) => bindHold($(id), { error: fail, info: t => out('#tRes', true, t), done: async wav => { out('#tRes', true, '正在听写…'); try { const r = await stt(wav, lang); out('#tRes', r.ok, r.ok ? what + '听写接口正常，听到的是：' + r.text : '接口通了，但没听出内容（接口返回：' + r.status + '）'); } catch (e) { fail(e); } } });
   holdTest('#tSttBtn', 'zh-CN', '中文'); holdTest('#tKmBtn', 'km-KH', '高棉语');
+  let hcWav = null;
+  bindHold($('#hcBtn'), { error: e => out('#hcSt', false, (e.zh || '出错') + (e.detail ? '\u3000' + e.detail : '')), info: t => out('#hcSt', true, t), done: async wav => {
+    hcWav = wav; $('#hcPlay').hidden = false;
+    out('#hcSt', true, '录到 ' + wavSecs(wav) + ' 秒，四种听法正在听…');
+    const ways = [
+      ['A 现在对话用的（通用型号，快）', () => hearKm(wav)],
+      ['B 通用型号，多想一会儿', () => hearKm(wav, { level: 'medium' })],
+      ['C 专用听写型号听，再翻译', async () => {
+        const j = await gPost('interactions', { model: 'models/gemini-3.5-transcribe', input: [{ type: 'audio', data: await blobToB64(wav), mime_type: 'audio/wav' }], generation_config: { transcription_config: { language_codes: ['km-KH'] } } }, '听写');
+        const km = gText(j).trim(); if (!km) return { km: '', zh: '' };
+        const z = await kmToZh(km); return { km, zh: z.zh, sure: z.sure, note: z.note }; }],
+      ['D 谷歌更强的型号', () => hearKm(wav, { model: 'gemini-pro-latest' })]
+    ];
+    const rows = ways.map(w => ({ name: w[0] }));
+    const draw = () => { $('#hcRes').innerHTML = rows.map(r => `<div class="tips"><p><b>${esc(r.name)}</b>${r.secs ? '（用时 ' + r.secs + ' 秒）' : ''}</p>${r.err ? errHTML(r.err) : r.d ? `<p class="km" lang="km" style="font-size:22px">${esc(r.d.km || '（没听出来）')}</p><p>${esc(r.d.zh || '')}</p>${r.d.sure === false && r.d.note ? `<p class="sub">它说拿不准：${esc(r.d.note)}</p>` : ''}` : '<p class="sub">正在听…</p>'}</div>`).join(''); };
+    draw();
+    await Promise.all(ways.map(async (w, i) => { const t0 = Date.now(); try { rows[i].d = await w[1](); } catch (e) { console.error(e); rows[i].err = e; } rows[i].secs = ((Date.now() - t0) / 1000).toFixed(1); draw(); }));
+    out('#hcSt', true, '录到 ' + wavSecs(wav) + ' 秒。请员工看下面哪一种写的高棉文是对的，再把这一屏截图发给 Claude。');
+  } });
   let cmp = [];
   $('#cmp').addEventListener('submit', async e => {
     e.preventDefault(); const zh = $('#cmpIn').value.trim(); if (!zh) return;
@@ -1080,7 +1119,8 @@ async function viewSet() {
     wipe: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次，确定清掉'; return; } const set = S.set, log = S.log, gloss = S.gloss; S = defState(); S.set = set; S.log = log; S.gloss = gloss; save(); viewSet(); },
     gPlay: b => say(S.gloss[+b.dataset.i].km),
     gDel: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次删除'; return; } S.gloss.splice(+b.dataset.i, 1); save(); viewSet(); },
-    gAdd: () => wordCapture($('#gBox'), { zh: '', old: '', done: () => viewSet() })
+    gAdd: () => wordCapture($('#gBox'), { zh: '', old: '', done: () => viewSet() }),
+    hcPlay: async () => { if (hcWav) await playBuf(await hcWav.arrayBuffer()); }
   };
 }
 

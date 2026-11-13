@@ -32,7 +32,8 @@ function clearMsg() { const m = $('#msg'); if (m) m.innerHTML = ''; }
 /* ---------- 存储：进度在 localStorage，声音和常用句在 IndexedDB ---------- */
 const LS = 'km_app_v1';
 function defState() {
-  return { set: { speech: 'google', gKey: '', gModel: 'gemini-3.8-flash', trEngine: 'gemini', voiceF: 'Fola', voiceM: 'Rami', voiceNote: '', azKey: '', azRegion: 'southeastasia', clKey: '', model: 'claude-fable-5-2', voice: 'f', theme: 'light' },
+  return { set: { speech: 'google', gKey: '', gModel: 'gemini-3.8-flash', trEngine: 'gemini', voiceF: 'Fola', voiceM: 'Rami', voiceNote: '', azKey: '', azRegion: 'southeastasia', clKey: '', model: 'claude-fable-5-2', voice: 'f', theme: 'light', addr: '' },
+    gloss: [{ zh: '机器、贩卖机', km: 'ម៉ាស៊ីន' }, { zh: '补货、补饮料', km: 'ដាក់ទឹកថែម' }, { zh: '饮料', km: 'ទឹក' }],
     units: {}, ear: {}, boss: {}, flags: {}, rev: {}, streak: { last: '', days: 0 }, mission: null, missionLog: [], log: [] };
 }
 let S = (function () {
@@ -361,8 +362,8 @@ const SYS = `你是土生土长的金边人，同时精通中文。用户是在�
 
 翻译要求：
 1. 用金边人日常口语，像本地老板当面跟员工说话那样自然、客气、简短。不要书面语、公文腔，不要报纸新闻用词，不要王室或僧侣用语。
-2. 说话人是男性，听的人是员工，男女都有。原话里没有称呼就不要加称呼，直接省略主语。绝对不要用 អូន 称呼员工（男人这样叫女员工像在叫女朋友）。原话里叫了人，对比自己小的用 ប្អូន，对比自己大的用 បង。
-3. 这几个词用固定说法，不要换别的词：机器、贩卖机 = ម៉ាស៊ីន（要说全就是 ម៉ាស៊ីនលក់ទឹក），不要说成 ទូ；补货、补饮料 = ដាក់ទឹកថែម；饮料 = ទឹក。零钱、钥匙等其他词，用本地员工平时真正会说的说法，口语里常用的外来词可以用。
+2. 说话人是男性，听的人是员工，男女都有。绝对不要用 អូន 称呼员工（男人这样叫女员工像在叫女朋友）。称呼怎么用，照下面"称呼"那一条。
+3. 下面"固定说法"里列出的词必须照用，不要换别的词。其他像零钱、钥匙这类词，用本地员工平时真正会说的说法，口语里常用的外来词可以用。
 4. 一句话一个意思，句子尽量短。原话如果有歧义，按最可能的工作场景理解，并在 note 里用中文说明你是怎么理解的。
 5. 如果原话不是一句要翻译的话（比如空的、乱码），km 留空，note 说明原因。
 6. 忠实原话：不要添加原话里没有的意思，也不要漏掉原话里有的意思。
@@ -401,7 +402,7 @@ async function claude(system, user) {
 async function translate(zh, prev, engine) {
   let user = '中文原话：' + zh;
   if (prev) user += `\n\n上一次的译法是「${prev}」，本地员工没听懂或者觉得不自然。请换一种更口语、更简单的说法。`;
-  const raw = await llm(SYS, user, engine), who = engineName(engine);
+  const raw = await llm(sysFull(), user, engine), who = engineName(engine);
   const a = raw.indexOf('{'), b = raw.lastIndexOf('}');
   let j;
   try { j = JSON.parse(raw.slice(a, b + 1)); } catch (e) { throw new AppErr(who + '回的内容格式不对，再试一次', raw.slice(0, 300)); }
@@ -416,8 +417,25 @@ const plainRo = t => String(t || '').replace(/[əɨɯɤ]/g, 'e').replace(/ɔ/g, 
 function jsonOf(raw, who) { try { return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch (e) { throw new AppErr(who + '回的内容格式不对，再试一次', raw.slice(0, 300)); } }
 const SYS_HEAD = SYS.slice(0, SYS.indexOf('读音提示 ro 的写法'));   // 身份 + 翻译要求
 const RO_RULES = SYS.slice(SYS.indexOf('读音提示 ro 的写法'), SYS.indexOf('只输出一个 JSON'));
-const SYS_FAST = SYS_HEAD + '只输出翻好的那一句高棉文，不加句号，不要任何别的文字、解释、引号或读音。如果原话不是一句要翻译的话，只输出一个空格。';
-const SYS_ZH_AUDIO = SYS_HEAD + `这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。
+const SYS_TAIL = SYS.slice(SYS.indexOf('只输出一个 JSON'));
+/* 称呼：高棉语的"你"要看对方比自己大还是小。翻译页上选"对方是谁"，没选就不加称呼 */
+const ADDRS = [['', '不加称呼'], ['y', '比我小'], ['o', '哥姐辈'], ['u', '叔辈'], ['a', '姨辈']];
+const ADDR_RULE = {
+  '': '原话里没有称呼就不要加称呼，直接省略主语。原话里叫了人，对比自己小的用 ប្អូន，对比自己大的用 បង。',
+  y: '听话的人比说话人年纪小。用 ប្អូន 称呼对方：句子开头叫一声，原话里的"你"也用这个词，其他地方不要重复叫。',
+  o: '听话的人比说话人大一些，或者是要客气对待的平辈。用 បង 称呼对方：句子开头叫一声，原话里的"你"也用这个词，其他地方不要重复叫。',
+  u: '听话的人是父母那一辈的男性长辈，语气要更客气。用 ពូ 称呼对方：句子开头叫一声，原话里的"你"也用这个词，其他地方不要重复叫。',
+  a: '听话的人是父母那一辈的女性长辈，语气要更客气。用 មីង 称呼对方：句子开头叫一声，原话里的"你"也用这个词，其他地方不要重复叫。'
+};
+const glossText = () => (S.gloss || []).map(g => '- ' + g.zh + ' = ' + g.km).join('\n');
+function trExtra() {
+  const g = glossText();
+  return (g ? '固定说法（这些词必须照下面的说）：\n' + g + '\n\n' : '') + '称呼：' + (ADDR_RULE[S.set.addr] || ADDR_RULE['']) + '\n\n';
+}
+const sysHead = () => SYS_HEAD + trExtra();
+const sysFull = () => sysHead() + RO_RULES + SYS_TAIL;
+const sysFast = () => sysHead() + '只输出翻好的那一句高棉文，不加句号，不要任何别的文字、解释、引号或读音。如果原话不是一句要翻译的话，只输出一个空格。';
+const sysZhAudio = () => sysHead() + `这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"zh":"听到的中文原话","km":"整句高棉文，不加句号"}
 如果录音里没有人说话或者完全听不清，zh 和 km 都留空。`;
 const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面是一句中文，和已经定下来的高棉语口语译文。不要改译文，只给它配上逐词拆分和读音，方便一个只会汉语拼音的中国人照着念、核对意思。
@@ -434,19 +452,21 @@ const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是�
 4. 如果录音里没有人说话，km 和 zh 都留空。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
-const TR_V = 2;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
+const TR_V = 3;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
+const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
+const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
 const audioParts = async wav => [{ inlineData: { mimeType: 'audio/wav', data: await blobToB64(wav) } }, { text: '请听这段录音。' }];
-function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words: [], back: '', note: '', tip: '', by: '谷歌', ts: Date.now(), uses: 0, staff: null, v: TR_V }; }
+function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words: [], back: '', note: '', tip: '', by: '谷歌', ts: Date.now(), uses: 0, staff: null, v: trVer() }; }
 async function quickKm(zh, prev) {
   let user = '中文原话：' + zh;
   if (prev) user += `\n\n上一次的译法是「${prev}」，本地员工没听懂或者觉得不自然。请换一种更口语、更简单的说法。`;
-  const km = (await gGen(SYS_FAST, [{ text: user }], '翻译', true)).trim().replace(/^["'「“]+|["'」”。។]+$/g, '');
+  const km = (await gGen(sysFast(), [{ text: user }], '翻译', true)).trim().replace(/^["'「“]+|["'」”。។]+$/g, '');
   if (!isKm(km)) throw new AppErr('谷歌没给出高棉文，再试一次', km.slice(0, 300));
   return km;
 }
 async function hearZh(wav) {   // 听中文录音，一步出中文原话和高棉语
-  const j = jsonOf(await gGen(SYS_ZH_AUDIO, await audioParts(wav), '听和翻译'), '谷歌');
+  const j = jsonOf(await gGen(sysZhAudio(), await audioParts(wav), '听和翻译'), '谷歌');
   return { zh: String(j.zh || '').trim(), km: String(j.km || '').trim() };
 }
 async function hearKm(wav) {   // 听高棉语录音，一步出高棉文和中文意思
@@ -460,13 +480,53 @@ async function fillDetail(p) {
   p.words = words; p.ro = plainRo(j.ro); p.back = String(j.back || ''); p.note = String(j.note || ''); p.tip = String(j.tip || '');
   return p;
 }
+async function hearWord(wav, zh, old) {   // 员工说一个词，写成高棉文
+  const t = await gGen(`你是听写员。录音里一位柬埔寨人说了一个高棉语的词或短语${zh ? '，意思是「' + zh + '」' : ''}。${old ? '之前用的说法是「' + old + '」，他认为不合适，现在说的是他们平时的说法。' : ''}把他说的一字不差写成高棉文。只输出这个高棉文的词，不要翻译、不要解释、不要加标点。如果没有人说话或者完全听不清，只输出一个空格。`, await audioParts(wav), '听写', true);
+  return isKm(t) ? t.trim().replace(/[។\s]+$/, '') : '';
+}
+function setGloss(zh, km) { S.gloss = (S.gloss || []).filter(g => g.zh !== zh); S.gloss.push({ zh, km }); save(); }
+const HOLD_CSS = 'touch-action:none;user-select:none;-webkit-user-select:none';
+function wordCapture(box, o) {   // o: { zh 中文词, old 原来的说法, done() 存好以后, cancel() }
+  let heard = '';
+  const st = t => { const e = box.querySelector('.fixst'); if (e) e.textContent = t || ''; };
+  function draw(msg) {
+    const zh = (box.querySelector('.fixzh') || {}).value;
+    box.innerHTML = `<div style="margin-top:10px;padding:12px;border-radius:14px;background:rgba(127,127,127,.16)"><p><b>改固定说法</b>${o.old ? '（原来说的是 <span class="km" lang="km">' + esc(o.old) + '</span>）' : ''}</p>
+      <label class="f">中文词</label><input class="fixzh" autocomplete="off" style="color:var(--ink)" placeholder="比如：钱箱" value="${esc(zh != null ? zh : (o.zh || ''))}">
+      ${heard ? `<p class="km" lang="km" style="font-size:30px;font-weight:600;margin-top:8px">${esc(heard)}</p><p style="font-size:13px;opacity:.85">请员工看一下上面这个词写得对不对。</p>
+        <div class="btns"><button class="b pri" data-fx="save">对，存下来</button><button class="b" data-fx="play">再念一遍</button><button class="b" data-fx="redo">不对，重说</button><button class="b" data-fx="cancel">取消</button></div>`
+      : `<div class="btns"><button class="b pri fixrec" style="${HOLD_CSS}">员工按住说这个词</button><button class="b" data-fx="cancel">取消</button></div>`}
+      <p class="fixst" style="min-height:22px;font-size:14px;margin-top:6px">${esc(msg || '')}</p></div>`;
+    const rec = box.querySelector('.fixrec');
+    if (rec) bindHold(rec, { error: e => st((e.zh || '出错了') + (e.detail ? '\u3000' + e.detail : '')), info: t => st(t), done: async wav => {
+      st('正在听…');
+      heard = await hearWord(wav, box.querySelector('.fixzh').value.trim(), o.old);
+      if (!heard) return draw('没听出来，请员工离手机近一点再说一次。');
+      draw(''); say(heard).catch(console.warn);
+    } });
+    box.style.scrollMarginTop = '76px'; box.scrollIntoView({ block: 'start' });   // 面板挪到屏幕上半截，别被底下的话筒栏挡住
+  }
+  box.onclick = e => {
+    const b = e.target.closest('[data-fx]'); if (!b) return; e.stopPropagation();
+    const fx = b.dataset.fx;
+    if (fx === 'play') say(heard).catch(console.warn);
+    else if (fx === 'redo') { heard = ''; draw(''); }
+    else if (fx === 'cancel') { box.innerHTML = ''; box.onclick = null; if (o.cancel) o.cancel(); }
+    else if (fx === 'save') {
+      const zh = box.querySelector('.fixzh').value.trim();
+      if (!zh) return st('先在上面填这个词的中文。');
+      setGloss(zh, heard); box.innerHTML = ''; box.onclick = null; if (o.done) o.done(zh, heard);
+    }
+  };
+  draw('');
+}
 const LOADING = new WeakSet(); let trRefresh = null;
 function addDetail(p) {   // 不挡着出声：后台补逐词和读音，补好了刷新一下翻译页
   if (LOADING.has(p)) return;
   LOADING.add(p);
   fillDetail(p).catch(e => console.warn('逐词和读音没取到', e)).then(async () => {
     LOADING.delete(p);
-    try { await idb('phrases', 'readwrite', s => s.put(p, normZh(p.zh))); } catch (e) { console.warn(e); }
+    try { await idb('phrases', 'readwrite', s => s.put(p, p.k || normZh(p.zh))); } catch (e) { console.warn(e); }
     save(); if (TAB === 'tr' && trRefresh) trRefresh(p);
   });
 }
@@ -494,7 +554,7 @@ function markWord(i) {
   view.querySelectorAll('.ph .w').forEach((el, k) => el.classList.toggle('on', k === i));
   const g = $('#gloss'); if (!g || !CUR) return;
   const w = wordsOf(CUR)[i];
-  g.innerHTML = w ? `<b lang="km">${esc(w.km)}</b>\u3000${esc(w.ro)}\u3000${esc(w.zh)}` : '';
+  g.innerHTML = w ? `<b lang="km">${esc(w.km)}</b>\u3000${esc(w.ro)}\u3000${esc(w.zh)}${TAB === 'tr' && wordsOf(CUR).length > 1 ? `\u3000<button class="lk" data-act="fixWord" data-i="${i}" style="padding:0">这个词不对</button>` : ''}` : '';
 }
 const cardActs = {
   play: () => say(CUR.km),
@@ -549,13 +609,18 @@ function viewTr() {
   view.innerHTML = `${keyWarn()}<div id="msg"></div><div class="chat" id="chat"></div>
     <div class="dock"><div class="in">
       <form class="typed" id="typed" hidden><input id="zhIn" placeholder="打中文，比如：去给机器补饮料" autocomplete="off"><button class="b pri">翻译</button></form>
-      <div class="tools"><button class="pill" data-act="phr">常用句</button><button class="pill" data-act="kb">打字</button><button class="pill" data-act="clr">清空对话</button></div>
+      <div class="tools" style="gap:6px"><select class="pill" id="addrSel" aria-label="对方是谁，决定用什么称呼" style="padding:6px 8px;max-width:128px">${ADDRS.map(a => `<option value="${a[0]}" ${a[0] === (S.set.addr || '') ? 'selected' : ''}>对方：${a[1]}</option>`).join('')}</select><button class="pill" data-act="phr">常用句</button><button class="pill" data-act="kb">打字</button><button class="pill" data-act="clr">清空对话</button></div>
       <div class="talk2">
         <div class="talker"><button class="hold kmb" id="hKm" aria-label="员工按住说高棉语">${MIC_SVG}</button><span class="l1 km" lang="km">ខ្មែរ</span><span class="l2">员工按住说高棉语</span></div>
         <div class="talker"><button class="hold zhb" id="hZh" aria-label="我按住说中文">${MIC_SVG}</button><span class="l1">中文</span><span class="l2">我按住说，松开翻译</span></div>
       </div>
     </div></div>`;
   const chat = $('#chat');
+  const fit = () => { chat.style.paddingBottom = (view.querySelector('.dock').offsetHeight + 24) + 'px'; };   // 底下那块有多高，对话就让出多高，免得最后一个气泡的按钮被挡住
+  const addrSel = $('#addrSel');
+  const paintAddr = () => { const on = !!S.set.addr; addrSel.style.background = on ? 'var(--pri)' : ''; addrSel.style.color = on ? '#fff' : ''; };   // 选了称呼就变蓝，提醒现在每句都会带称呼
+  addrSel.addEventListener('change', () => { S.set.addr = addrSel.value; save(); paintAddr(); });
+  paintAddr();
   const persist = () => { S.log = log.slice(-40); save(); };
   const setErr = (side, e) => { console.error(e); pend = null; err = { side, zh: e instanceof AppErr ? e.zh : '程序出错了', detail: e instanceof AppErr ? e.detail : String(e && (e.stack || e.message) || e) }; render(); };
   function bubble(x, i) {
@@ -566,7 +631,7 @@ function viewTr() {
       <p class="km" lang="km">${ws.length > 1 ? ws.map((w, k) => `<span class="w" data-act="word" data-i="${k}">${esc(w.km)}</span>`).join('') : esc(p.km)}</p>
       <p class="br">${p.ro ? esc(p.ro) : LOADING.has(p) ? '正在准备读音和逐词…' : ''}</p>
       <div class="btns"><button class="b pri" data-act="play">播放</button><button class="b" data-act="slow">慢速</button>${ws.length > 1 ? '<button class="b" data-act="words">逐词</button>' : ''}<button class="b" data-act="show">放大</button><button class="b" data-act="voice">${S.set.voice === 'f' ? '女声' : '男声'}</button></div>
-      <div class="gloss" id="gloss"></div>
+      <div class="gloss" id="gloss"></div><div id="fixBox"></div>
       ${p.back ? `<p class="bnote">直译回中文：${esc(p.back)}</p>` : ''}${p.note ? `<p class="bnote">提醒：${esc(p.note)}</p>` : ''}${p.tip ? `<p class="bnote">发音：${esc(p.tip)}</p>` : ''}
       <div class="btns"><button class="lk" data-act="staffOk">员工听懂了</button><button class="lk" data-act="retry">没听懂，换个说法</button>${!p.ro && !p.back && !LOADING.has(p) && fastOn() ? '<button class="lk" data-act="detail">补上读音和逐词</button>' : ''}</div></div>`;
   }
@@ -575,22 +640,22 @@ function viewTr() {
     if (pend) items.push(`<div class="bub ${pend.side} pend">${pend.km ? `<p class="km" lang="km">${esc(pend.km)}</p>` : ''}<p>${esc(pend.text)}</p></div>`);
     if (err) items.push(`<div class="bub ${err.side} err"><b>${esc(err.zh)}</b>${err.detail ? `<small>${esc(err.detail)}</small>` : ''}</div>`);
     chat.innerHTML = items.join('') || `<div class="empty"><p class="big">两个人对着手机说话</p><p>你按住蓝色按钮说中文，松开后手机用高棉语念给员工听。</p><p>员工按住橙色按钮说高棉语，松开后屏幕显示中文。</p></div>`;
-    CUR = active >= 0 && log[active] ? log[active].p : null;
+    CUR = active >= 0 && log[active] ? log[active].p : null; fit();
     requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight));
   }
   trRefresh = p => { if (log.some(x => x.p === p)) render(); };
   async function sendZh(zh, prev, at, km0) {   // km0：录音那一步已经顺手翻好的高棉语
     zh = zh.trim(); if (!zh) return;
-    const k = normZh(zh);
+    const k = phraseKey(zh);
     pend = { side: 'me', text: '正在翻译：' + zh }; err = null; render();
     try {
       let p = prev ? null : await idb('phrases', 'readonly', s => s.get(k)), fresh = false;
-      if (p && p.v !== TR_V && p.staff !== 'ok') p = null;
+      if (p && p.v !== trVer() && p.staff !== 'ok') p = null;
       if (!p) {
         if (fastOn()) { p = basePhrase(zh, km0 && isKm(km0) ? km0 : await quickKm(zh, prev)); fresh = true; }
-        else { p = await translate(zh, prev); p.v = TR_V; }
+        else { p = await translate(zh, prev); p.v = trVer(); }
       }
-      p.uses = (p.uses || 0) + 1; p.last = Date.now();
+      p.uses = (p.uses || 0) + 1; p.last = Date.now(); p.k = k;
       await idb('phrases', 'readwrite', s => s.put(p, k));
       if (at != null) log[at] = { t: 'me', p }; else log.push({ t: 'me', p });
       active = at != null ? at : log.length - 1;
@@ -629,15 +694,17 @@ function viewTr() {
     toSet: () => go('set'),
     sel: b => { active = +b.dataset.i; render(); return say(log[active].p.km); },
     show: () => openShow(CUR.km),
-    staffOk: async () => { CUR.staff = 'ok'; await idb('phrases', 'readwrite', s => s.put(CUR, normZh(CUR.zh))); persist(); render(); },
+    staffOk: async () => { CUR.staff = 'ok'; await idb('phrases', 'readwrite', s => s.put(CUR, CUR.k || normZh(CUR.zh))); persist(); render(); },
     retry: () => sendZh(CUR.zh, CUR.km, active),
     detail: () => { addDetail(CUR); render(); },
-    kb: () => { const f = $('#typed'); f.hidden = !f.hidden; if (!f.hidden) $('#zhIn').focus(); },
+    fixWord: b => { const w = wordsOf(CUR)[+b.dataset.i], p = CUR, at = active; stopAudio();
+      wordCapture($('#fixBox'), { zh: w.zh, old: w.km, done: () => { p.staff = null; sendZh(p.zh, null, at); } }); },
+    kb: () => { const f = $('#typed'); f.hidden = !f.hidden; fit(); if (!f.hidden) $('#zhIn').focus(); },
     clr: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次清空'; return; } log = []; active = -1; err = null; persist(); delete b.dataset.sure; b.textContent = '清空对话'; render(); },
     phr: async () => {
       const all = (await idb('phrases', 'readonly', s => s.getAll())) || [];
       all.sort((a, b) => (b.last || b.ts) - (a.last || a.ts));
-      $('#phr').innerHTML = all.length ? all.map(p => `<li><button class="main" data-k="${esc(normZh(p.zh))}"><span>${esc(p.zh)}${p.staff === 'ok' ? '<span class="tag">员工听懂过</span>' : ''}</span><span class="km" lang="km">${esc(p.km)}</span></button><button class="x" data-k="${esc(normZh(p.zh))}">删除</button></li>`).join('') : '<li class="sub">还没有。翻译过的句子会自动存到这里，下次点一下直接播，不用联网。</li>';
+      $('#phr').innerHTML = all.length ? all.map(p => `<li><button class="main" data-k="${esc(p.k || normZh(p.zh))}"><span>${esc(p.zh)}${p.staff === 'ok' ? '<span class="tag">员工听懂过</span>' : ''}</span><span class="km" lang="km">${esc(p.km)}</span></button><button class="x" data-k="${esc(p.k || normZh(p.zh))}">删除</button></li>`).join('') : '<li class="sub">还没有。翻译过的句子会自动存到这里，下次点一下直接播，不用联网。</li>';
       $('#sheet').classList.add('on');
     }
   };
@@ -938,6 +1005,9 @@ async function viewSet() {
       <div class="res" id="tRes"></div></div>
     <div class="card flat"><p class="big">两家翻译对比</p><p class="sub">同一句中文让谷歌和 Claude 各翻一次，放给本地人听，看谁翻得对。哪家的密钥没填就只出另一家。</p>
       <form class="typed" id="cmp" style="margin-top:10px"><input id="cmpIn" placeholder="打一句你平时会说的中文" autocomplete="off"><button class="b pri">对比</button></form><div id="cmpRes"></div></div>
+    <div class="card flat"><p class="big">固定说法表</p><p class="sub">表里的词，翻译时一律照这里的说法。只在某个词真让员工听不懂或者误会时才加，个人说话习惯不用加。</p>
+      <ul class="list" id="glossList" style="margin-top:10px">${(S.gloss || []).map((g, i) => `<li><span class="main"><span>${esc(g.zh)}</span><span class="km" lang="km">${esc(g.km)}</span></span><button class="x" data-act="gPlay" data-i="${i}">听</button><button class="x" data-act="gDel" data-i="${i}">删除</button></li>`).join('') || '<li class="sub">表是空的。</li>'}</ul>
+      <div class="btns"><button class="b" data-act="gAdd">加一条</button></div><div id="gBox"></div></div>
     <div class="card flat"><p class="big">手机里存的东西</p><p>已存声音 ${nAudio} 段，常用句 ${nPhr} 句。</p>
       <div class="btns"><button class="b" data-act="dl">预先下载全部课程发音</button><button class="b ghost" data-act="wipe">清掉学习进度</button></div><div class="res" id="dlRes"></div></div>
     <div class="card flat"><p class="big">被本地人指出不对的句子</p>${flags.length ? `<ul class="list">${flags.map(k => `<li><span class="main"><span>${esc(S.flags[k].zh)}</span><span class="km" lang="km">${esc(k)}</span></span><span class="sub">${esc(S.flags[k].at)}</span></li>`).join('')}</ul><p class="sub">把这几句发给 Claude，让它改课程。</p>` : '<p class="sub">还没有。真人验证时按"这句话本身不对"会记到这里。</p>'}</div>`;
@@ -1000,7 +1070,10 @@ async function viewSet() {
       if (lastErr) out('#dlRes', false, `下载中断，成功 ${n} 句。原因：${lastErr.zh || lastErr}\u3000${lastErr.detail || ''}`); else out('#dlRes', true, `全部 ${uniq.length} 句的${S.set.voice === 'f' ? '女声' : '男声'}发音都已存进手机。`);
       b.disabled = false;
     },
-    wipe: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次，确定清掉'; return; } const set = S.set, log = S.log; S = defState(); S.set = set; S.log = log; save(); viewSet(); }
+    wipe: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次，确定清掉'; return; } const set = S.set, log = S.log, gloss = S.gloss; S = defState(); S.set = set; S.log = log; S.gloss = gloss; save(); viewSet(); },
+    gPlay: b => say(S.gloss[+b.dataset.i].km),
+    gDel: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次删除'; return; } S.gloss.splice(+b.dataset.i, 1); save(); viewSet(); },
+    gAdd: () => wordCapture($('#gBox'), { zh: '', old: '', done: () => viewSet() })
   };
 }
 

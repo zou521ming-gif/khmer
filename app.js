@@ -431,9 +431,10 @@ const ADDR_RULE = {
 const glossText = () => (S.gloss || []).map(g => '- ' + g.zh + ' = ' + g.km).join('\n');
 function trExtra() {
   const g = glossText();
-  return (g ? '固定说法（这些词必须照下面的说）：\n' + g + '\n\n' : '') + '称呼：' + (ADDR_RULE[S.set.addr] || ADDR_RULE['']) + '\n\n';
+  return (g ? '固定说法（这些词必须照下面的说；直译回中文时，这些词也按左边的中文写，比如 ទឹក 写"饮料"不写"水"）：\n' + g + '\n\n' : '') + '称呼：' + (ADDR_RULE[S.set.addr] || ADDR_RULE['']) + '\n\n';
 }
 const sysHead = () => SYS_HEAD + trExtra();
+const sysDetail = () => SYS_DETAIL + (glossText() ? '\n\n写 back 和 words 里的 zh 时，下面这些词按左边的中文写，不要换成别的意思（比如 ទឹក 写"饮料"，不要写"水"）：\n' + glossText() : '');
 const sysFull = () => sysHead() + RO_RULES + SYS_TAIL;
 const sysFast = () => sysHead() + '只输出翻好的那一句高棉文，不加句号，不要任何别的文字、解释、引号或读音。如果原话不是一句要翻译的话，只输出一个空格。';
 const sysZhAudio = () => sysHead() + `这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。
@@ -453,7 +454,7 @@ const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是�
 4. 如果录音里没有人说话，km 和 zh 都留空。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
-const TR_V = 5;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
+const TR_V = 6;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
 const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
@@ -475,7 +476,7 @@ async function hearKm(wav) {   // 听高棉语录音，一步出高棉文和中�
   return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), sure: j.sure !== false, note: String(j.note || '') };
 }
 async function fillDetail(p) {
-  const j = jsonOf(await gGen(SYS_DETAIL, [{ text: '中文原话：' + p.zh + '\n高棉语译文：' + p.km }], '逐词拆分'), '谷歌');
+  const j = jsonOf(await gGen(sysDetail(), [{ text: '中文原话：' + p.zh + '\n高棉语译文：' + p.km }], '逐词拆分'), '谷歌');
   let words = Array.isArray(j.words) ? j.words.filter(w => w && isKm(w.km)).map(w => ({ km: String(w.km).trim(), ro: plainRo(w.ro), zh: String(w.zh || '') })) : [];
   if (normKm(words.map(w => w.km).join('')) !== normKm(p.km)) words = [];   // 拆词对不上整句就不用，不硬凑
   p.words = words; p.ro = plainRo(j.ro); p.back = String(j.back || ''); p.note = String(j.note || ''); p.tip = String(j.tip || '');

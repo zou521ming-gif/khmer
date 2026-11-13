@@ -688,7 +688,7 @@ function keyWarn() {
 const LIVE_MODEL = 'models/gemini-3.5-live-translate-preview';
 const LIVE_WS = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=';
 const liveSys = () => '说话的人一个是在柬埔寨做饮料自动贩卖机生意的中国老板，一个是他的柬埔寨本地员工，两个人面对面说话。常说的事情：给机器补货、收钱、修机器、送货。翻成对方平时说的口语，意思要准，问句还是问句。\n\n' + trExtra();
-const KM_RUN = /[\u1780-\u17FF][\u1780-\u17FF\u200B\s?]*/g;   // 一段连着的高棉文
+const HAS_KM = /[\u1780-\u17FF]/, HAS_ZH = /[\u4E00-\u9FFF]/;   // 这段字里有没有高棉文、有没有汉字
 const i16b64 = a => { const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); let t = ''; for (let i = 0; i < u.length; i += 0x8000) t += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(t); };
 const MIC_SVG = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
 const SYS_KM = `你是精通高棉语和中文的口译员。下面是一位柬埔寨员工对中国老板说的一句高棉语口语，是语音识别出来的文字，可能有同音错字、漏字、断词错误。老板做饮料自动贩卖机生意。
@@ -801,17 +801,17 @@ function viewTr() {
   function liveShow() {   // 正在说的这一句，边出边显示
     if (!live.on) return;
     const a = live.cur.km, b = live.cur.zh;
-    if (a && a.outT) pend = { side: 'me', km: a.outT, text: a.inT.replace(KM_RUN, '') };
-    else if (b && b.outT) pend = { side: 'st', km: (b.inT.match(KM_RUN) || []).join(' '), text: b.outT };
-    else pend = { side: 'me', text: '实时翻译开着：直接说话，不用按。机器念译文的时候先别说话。' + (((a && a.inT) || (b && b.inT)) ? '\u3000听到：' + ((a && a.inT) || b.inT) : '') };
+    if (a && a.outT) pend = { side: 'me', km: a.outT, text: a.src };
+    else if (b && b.outT) pend = { side: 'st', km: b.src, text: b.outT };
+    else pend = { side: 'me', text: '实时翻译开着：直接说话，不用按。机器念译文的时候先别说话。' + (((a && a.src) || (b && b.src)) ? '\u3000听到：' + ((a && a.src) || b.src) : '') };
     err = null; render();
   }
   function liveFlush(t) {   // 一句说完（1.8 秒没有新内容）：变成正式的气泡
     const c = live.cur[t]; if (!c) return; clearTimeout(c.tm); delete live.cur[t];
     const out = c.outT.trim();
     if (out) {
-      if (t === 'km') { const p = basePhrase(c.inT.replace(KM_RUN, '').trim() || '（没记下中文）', out); p.by = '谷歌实时'; log.push({ t: 'me', p, at: Date.now() }); active = log.length - 1; }
-      else log.push({ t: 'st', km: (c.inT.match(KM_RUN) || []).join(' ').trim(), zh: out, sure: true, note: '', at: Date.now() });
+      if (t === 'km') { const p = basePhrase(c.src.trim() || '（没记下中文）', out); p.by = '谷歌实时'; log.push({ t: 'me', p, at: Date.now() }); active = log.length - 1; }
+      else log.push({ t: 'st', km: c.src.trim(), zh: out, sure: true, note: '', at: Date.now() });
       persist();
     }
     liveShow();
@@ -825,12 +825,20 @@ function viewTr() {
     const src = live.ctx.createBufferSource(); src.buffer = ab; src.connect(live.ctx.destination);
     const at = Math.max(live.ctx.currentTime + 0.03, live.playEnd); src.start(at); live.playEnd = at + ab.duration; live.played += ab.duration;
   }
+  /* 两条连接听到的是同一段声音。实测（2026-11-13）翻成中文的那条听到中文时，有时会把中文原样再念一遍，
+     所以每条只认自己该翻的那种话：翻成高棉语的只认中文，翻成中文的只认高棉语；别的话它出的字和声音都不要。还不知道是哪种话时，声音先留着不播。 */
   function liveMsg(t, j) {
     const sc = j.serverContent; if (!sc || !live.on) return;
-    const c = live.cur[t] || (live.cur[t] = { inT: '', outT: '' }), it = sc.inputTranscription, ot = sc.outputTranscription;
-    if (it && it.text) c.inT += it.text;
-    if (ot && ot.text) c.outT += ot.text;
-    for (const p of ((sc.modelTurn || {}).parts || [])) { const d = p.inlineData || p.inline_data; if (d && d.data) livePlay(d.data); }
+    const it = sc.inputTranscription, ot = sc.outputTranscription, parts = (sc.modelTurn || {}).parts || [];
+    if (!(it && it.text) && !(ot && ot.text) && !parts.length) return;
+    const c = live.cur[t] || (live.cur[t] = { src: '', outT: '', lang: '', hold: [] }), want = t === 'km' ? 'zh' : 'km';
+    if (it && it.text) {
+      c.lang = HAS_KM.test(it.text) ? 'km' : HAS_ZH.test(it.text) ? 'zh' : String(it.languageCode || c.lang).slice(0, 2);
+      if (c.lang === want) { c.src += it.text; c.hold.forEach(livePlay); } c.hold = [];
+    }
+    const ok = c.lang === want;
+    if (ot && ot.text && ok) c.outT += ot.text;
+    for (const p of parts) { const d = p.inlineData || p.inline_data; if (!d || !d.data) continue; if (ok) livePlay(d.data); else if (!c.lang) { c.hold.push(d.data); if (c.hold.length > 12) c.hold.shift(); } }
     if ((it && it.text) || (ot && ot.text)) { live.lastVoice = Date.now(); clearTimeout(c.tm); c.tm = setTimeout(() => liveFlush(t), 1800); liveShow(); }
   }
   function liveOpen(t, sys) {   // 接通一条连接，谷歌回"准备好了"才算数

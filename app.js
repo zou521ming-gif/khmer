@@ -364,10 +364,10 @@ function bindHold(btn, h) {
 const SYS = `你是土生土长的金边人，同时精通中文。用户是在柬埔寨做饮料自动贩卖机生意的中国男老板，不会高棉语。他会说一句中文，你要把它变成他能直接对本地员工开口说的高棉语。
 
 翻译要求：
-1. 用金边人日常口语，像本地老板当面跟员工说话那样自然、客气、简短。不要书面语、公文腔，不要报纸新闻用词，不要王室或僧侣用语。
+1. 用金边人日常口语，像本地老板当面跟员工说话那样自然、客气。不要书面语、公文腔，不要报纸新闻用词，不要王室或僧侣用语。
 2. 说话人是男性，听的人是员工，男女都有。绝对不要用 អូន 称呼员工（男人这样叫女员工像在叫女朋友）。称呼怎么用，照下面"称呼"那一条。
 3. 下面"固定说法"里列出的词必须照用，不要换别的词。其他像零钱、钥匙这类词，用本地员工平时真正会说的说法，口语里常用的外来词可以用。
-4. 一句话一个意思，句子尽量短。原话如果有歧义，按最可能的工作场景理解，并在 note 里用中文说明你是怎么理解的。
+4. 一句话一个意思。语法要完整：往哪里、在哪里、给谁、用什么，这些介词和方向词一个都不能省，不要为了简短丢词。往机器、箱子、车这类东西里放、装、补东西时，要说清楚是放进它"里面"，不能只把两个名词并排放。原话如果有歧义，按最可能的工作场景理解，并在 note 里用中文说明你是怎么理解的。
 5. 如果原话不是一句要翻译的话（比如空的、乱码），km 留空，note 说明原因。
 6. 忠实原话：不要添加原话里没有的意思，也不要漏掉原话里有的意思。
 
@@ -439,10 +439,10 @@ function trExtra() {
 const sysHead = () => SYS_HEAD + trExtra();
 const sysDetail = () => SYS_DETAIL + (glossText() ? '\n\n写 back 和 words 里的 zh 时，下面这些词按左边的中文写，不要换成别的意思：\n' + glossText() : '');
 const sysFull = () => sysHead() + RO_RULES + SYS_TAIL;
-const sysFast = () => sysHead() + '只输出翻好的那一句高棉文，不加句号，不要任何别的文字、解释、引号或读音。如果原话不是一句要翻译的话，只输出一个空格。';
-const sysZhAudio = () => sysHead() + `这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。
-只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"zh":"听到的中文原话","km":"整句高棉文，不加句号"}
-如果录音里没有人说话或者完全听不清，zh 和 km 都留空。`;
+/* 先拆成分、出一稿、自己逐项对一遍再定稿。2026-11-13 本地人指出"去给机器补货"漏了"进……里面"，实测原来的"尽量简短"会让它丢介词 */
+const SELF_CHECK = `{"parts":"用中文把原话拆成成分列出来：时间、谁、做什么、对象、地点或方向、数量，原话没有的不写","draft":"第一稿高棉文","check":"拿上面每个成分逐个对照第一稿，写出漏了、多了或错了什么，尤其看介词和方向词；没有问题写 无","km":"定稿的整句高棉文，不加句号"}`;
+const sysFast = () => sysHead() + '分三步做，只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：\n' + SELF_CHECK + '\n如果原话不是一句要翻译的话，km 留空。';
+const sysZhAudio = () => sysHead() + '这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。分几步做，只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：\n{"zh":"听到的中文原话",' + SELF_CHECK.slice(1) + '\n如果录音里没有人说话或者完全听不清，zh 和 km 都留空。';
 const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面是一句中文，和已经定下来的高棉语口语译文。不要改译文，只给它配上逐词拆分和读音，方便一个只会汉语拼音的中国人照着念、核对意思。
 
 ` + RO_RULES + `只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
@@ -457,7 +457,7 @@ const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是�
 4. 如果录音里没有人说话，km 和 zh 都留空。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
-const TR_V = 7;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
+const TR_V = 8;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
 const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
@@ -466,13 +466,15 @@ function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words:
 async function quickKm(zh, prev) {
   let user = '中文原话：' + zh;
   if (prev) user += `\n\n上一次的译法是「${prev}」，本地员工没听懂或者觉得不自然。请换一种更口语、更简单的说法。`;
-  const km = (await gGen(sysFast(), [{ text: user }], '翻译', true)).trim().replace(/^["'「“]+|["'」”。។]+$/g, '');
+  const raw = (await gGen(sysFast(), [{ text: user }], '翻译', true)).trim();
+  let km = raw; if (raw.includes('{')) { const j = jsonOf(raw, '谷歌'); km = String(j.km || j.draft || ''); }
+  km = km.trim().replace(/^["'「“]+|["'」”。។]+$/g, '');
   if (!isKm(km)) throw new AppErr('谷歌没给出高棉文，再试一次', km.slice(0, 300));
   return km;
 }
 async function hearZh(wav) {   // 听中文录音，一步出中文原话和高棉语
   const j = jsonOf(await gGen(sysZhAudio(), await audioParts(wav), '听和翻译'), '谷歌');
-  return { zh: String(j.zh || '').trim(), km: String(j.km || '').trim() };
+  return { zh: String(j.zh || '').trim(), km: String(j.km || j.draft || '').trim() };
 }
 async function hearKm(wav) {   // 听高棉语录音，一步出高棉文和中文意思
   const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav), '听和翻译'), '谷歌');

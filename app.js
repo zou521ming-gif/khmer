@@ -715,7 +715,7 @@ function viewTr() {
     <div class="dock"><div class="in">
       <form class="typed" id="typed" hidden><input id="zhIn" placeholder="打中文，比如：去给机器补饮料" autocomplete="off"><button class="b pri">翻译</button></form>
       <div class="tools" style="gap:6px"><select class="pill" id="addrSel" aria-label="对方是谁，决定用什么称呼" style="padding:6px 8px;max-width:128px">${ADDRS.map(a => `<option value="${a[0]}" ${a[0] === (S.set.addr || '') ? 'selected' : ''}>对方：${a[1]}</option>`).join('')}</select><button class="pill" data-act="phr">常用句</button><button class="pill" data-act="kb">打字</button><button class="pill" data-act="clr">清空对话</button></div>
-      <button class="pill" id="liveBtn" data-act="live" style="width:100%;margin:8px 0 12px"></button>
+      ${location.hash === '#live' ? '<button class="pill" id="liveBtn" data-act="live" style="width:100%;margin:8px 0 12px"></button>' : ''}<!-- 实时翻译还不可靠（员工说高棉语那个方向会出错），先藏起来，网址后面加 #live 才显示 -->
       <div class="talk2">
         <div class="talker"><button class="hold kmb" id="hKm" aria-label="员工按住说高棉语">${MIC_SVG}</button><span class="l1 km" lang="km">ខ្មែរ</span><span class="l2">员工按住说高棉语</span></div>
         <div class="talker"><button class="hold zhb" id="hZh" aria-label="我按住说中文">${MIC_SVG}</button><span class="l1">中文</span><span class="l2">我按住说，松开翻译</span></div>

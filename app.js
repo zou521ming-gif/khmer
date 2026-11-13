@@ -33,12 +33,15 @@ function clearMsg() { const m = $('#msg'); if (m) m.innerHTML = ''; }
 const LS = 'km_app_v1';
 function defState() {
   return { set: { speech: 'google', gKey: '', gModel: 'gemini-3.8-flash', trEngine: 'gemini', voiceF: 'Fola', voiceM: 'Rami', voiceNote: '', azKey: '', azRegion: 'southeastasia', clKey: '', model: 'claude-fable-5-2', voice: 'f', theme: 'light', addr: '' },
-    gloss: [{ zh: '机器、贩卖机', km: 'ម៉ាស៊ីន' }, { zh: '补货、补饮料', km: 'ដាក់ទឹកថែម' }, { zh: '饮料', km: 'ទឹក' }],
+    gloss: [{ zh: '机器、贩卖机', km: 'ម៉ាស៊ីន' }],   // 只放本地人没提出异议的。2026-11-13 本地人指出 ដាក់ទឹកថែម 听起来是"加水"不是"补货"，那两条是 Claude 自己猜的，已撤掉
+    glossV: 2,
     units: {}, ear: {}, boss: {}, flags: {}, rev: {}, streak: { last: '', days: 0 }, mission: null, missionLog: [], log: [] };
 }
 let S = (function () {
   const d = defState();
-  try { const p = JSON.parse(localStorage.getItem(LS) || '{}'); Object.assign(d, p); d.set = Object.assign(defState().set, p.set || {}); } catch (e) { console.warn(e); }
+  try { const p = JSON.parse(localStorage.getItem(LS) || '{}'); Object.assign(d, p); d.set = Object.assign(defState().set, p.set || {});
+    if (p.gloss && p.glossV !== 2) { d.gloss = p.gloss.filter(g => !((g.zh === '补货、补饮料' && g.km === 'ដាក់ទឹកថែម') || (g.zh === '饮料' && g.km === 'ទឹក'))); d.glossV = 2; }   // 把早先自带的两条猜错的说法清掉，用户自己加的不动
+  } catch (e) { console.warn(e); }
   return d;
 })();
 function applyTheme() { const t = S.set.theme === 'dark' ? 'dark' : 'light'; document.documentElement.dataset.theme = t; const m = document.querySelector('meta[name=theme-color]'); if (m) m.content = t === 'dark' ? '#0B1020' : '#F4F6FB'; }
@@ -431,10 +434,10 @@ const ADDR_RULE = {
 const glossText = () => (S.gloss || []).map(g => '- ' + g.zh + ' = ' + g.km).join('\n');
 function trExtra() {
   const g = glossText();
-  return (g ? '固定说法（这些词必须照下面的说；直译回中文时，这些词也按左边的中文写，比如 ទឹក 写"饮料"不写"水"）：\n' + g + '\n\n' : '') + '称呼：' + (ADDR_RULE[S.set.addr] || ADDR_RULE['']) + '\n\n';
+  return (g ? '固定说法（这些词必须照下面的说；直译回中文时，这些词也按左边的中文写）：\n' + g + '\n\n' : '') + '称呼：' + (ADDR_RULE[S.set.addr] || ADDR_RULE['']) + '\n\n';
 }
 const sysHead = () => SYS_HEAD + trExtra();
-const sysDetail = () => SYS_DETAIL + (glossText() ? '\n\n写 back 和 words 里的 zh 时，下面这些词按左边的中文写，不要换成别的意思（比如 ទឹក 写"饮料"，不要写"水"）：\n' + glossText() : '');
+const sysDetail = () => SYS_DETAIL + (glossText() ? '\n\n写 back 和 words 里的 zh 时，下面这些词按左边的中文写，不要换成别的意思：\n' + glossText() : '');
 const sysFull = () => sysHead() + RO_RULES + SYS_TAIL;
 const sysFast = () => sysHead() + '只输出翻好的那一句高棉文，不加句号，不要任何别的文字、解释、引号或读音。如果原话不是一句要翻译的话，只输出一个空格。';
 const sysZhAudio = () => sysHead() + `这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。
@@ -454,7 +457,7 @@ const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是�
 4. 如果录音里没有人说话，km 和 zh 都留空。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
-const TR_V = 6;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
+const TR_V = 7;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
 const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;

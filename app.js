@@ -410,6 +410,7 @@ const SYS = `你是土生土长的金边人，同时精通中文。用户是在�
 4. 一句话一个意思。语法要完整：往哪里、在哪里、给谁、用什么，这些介词和方向词一个都不能省，不要为了简短丢词。往机器、箱子、车这类东西里放、装、补东西时，要说清楚是放进它"里面"，不能只把两个名词并排放。原话如果有歧义，按最可能的工作场景理解，并在 note 里用中文说明你是怎么理解的。
 5. 如果原话不是一句要翻译的话（比如空的、乱码），km 留空，note 说明原因。
 6. 忠实原话：不要添加原话里没有的意思，也不要漏掉原话里有的意思。
+7. 原话是问句，译文也必须是问句，用高棉语里问问题的说法，让人一听就知道是在问，不能变成陈述句。原话有几句，译文也分成几句，不要把两句并成一句。
 
 读音提示 ro 的写法（给只会汉语拼音的人看）：
 - 按汉语拼音读：b d g 不送气（对应 ប៉/ព、ត/ទ、ក/គ），p t k 送气（ផ/ភ、ថ/ធ、ខ/ឃ），j = ច/ជ，q = ឆ/ឈ，ny = ញ，ng = ង，w = វ。
@@ -420,7 +421,7 @@ const SYS = `你是土生土长的金边人，同时精通中文。用户是在�
 - 这几个称呼的读音固定这样写：ប្អូន = b-oun，បង = Boong，ពូ = buu，មីង = miing。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
-{"km":"整句高棉文，不加句号","words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思。称呼对方的词（ប្អូន、បង、ពូ、មីង）在句子里当「你」用时，写成 你（弟妹辈）、你（哥姐辈）、你（叔辈）、你（姨辈），不要只写弟妹、哥姐，words 里这个词的 zh 也这样写","note":"需要提醒老板的事，没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
+{"km":"整句高棉文。原话有几句就写几句，句和句之间空一格；问句句末保留问号 ?，陈述句句末不加句号","words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思。称呼对方的词（ប្អូន、បង、ពូ、មីង）在句子里当「你」用时，写成 你（弟妹辈）、你（哥姐辈）、你（叔辈）、你（姨辈），不要只写弟妹、哥姐，words 里这个词的 zh 也这样写","note":"需要提醒老板的事，没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
 words 里每个词的 km 按顺序直接拼起来必须正好等于整句 km。`;
 
 async function claude(system, user) {
@@ -480,7 +481,7 @@ const sysHead = () => SYS_HEAD + trExtra();
 const sysDetail = () => SYS_DETAIL + (glossText() ? '\n\n写 back 和 words 里的 zh 时，下面这些词按左边的中文写，不要换成别的意思：\n' + glossText() : '');
 const sysFull = () => sysHead() + RO_RULES + SYS_TAIL;
 /* 先拆成分、出一稿、自己逐项对一遍再定稿。2026-11-13 本地人指出"去给机器补货"漏了"进……里面"，实测原来的"尽量简短"会让它丢介词 */
-const SELF_CHECK = `{"parts":"用中文把原话拆成成分列出来：时间、谁、做什么、对象、地点或方向、数量，原话没有的不写","draft":"第一稿高棉文","check":"拿上面每个成分逐个对照第一稿，写出漏了、多了或错了什么，尤其看介词和方向词；没有问题写 无","km":"定稿的整句高棉文，不加句号"}`;
+const SELF_CHECK = `{"parts":"用中文把原话拆成成分列出来：时间、谁、做什么、对象、地点或方向、数量，原话没有的不写","draft":"第一稿高棉文","check":"拿上面每个成分逐个对照第一稿，写出漏了、多了或错了什么，尤其看介词和方向词、问句是不是还是问句、句数对不对；没有问题写 无","km":"定稿的高棉文。原话有几句就写几句，句和句之间空一格；问句句末保留问号 ?，陈述句句末不加句号"}`;
 const sysFast = () => sysHead() + '分三步做，只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：\n' + SELF_CHECK + '\n如果原话不是一句要翻译的话，km 留空。';
 const sysZhAudio = () => sysHead() + '这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。分几步做，只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：\n{"zh":"听到的中文原话",' + SELF_CHECK.slice(1) + '\n如果录音里没有人说话或者完全听不清，zh 和 km 都留空。';
 const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面是一句中文，和已经定下来的高棉语口语译文。不要改译文，只给它配上逐词拆分和读音，方便一个只会汉语拼音的中国人照着念、核对意思。
@@ -498,7 +499,7 @@ const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音应该�
 5. 听不清、或者拿不准他说的是什么时，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"speech":true,"lang":"km","km":"听到的原话","zh":"中文意思","sure":true,"note":""}`;
-const TR_V = 8;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
+const TR_V = 9;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
 const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
@@ -585,11 +586,17 @@ function addDetail(p) {   // 不挡着出声：后台补逐词和读音，补好
 /* ---------- 句子卡片（翻译结果和学新句共用） ---------- */
 let CUR = null;   // 当前屏幕上那张卡片对应的句子
 function wordsOf(p) { return p.words && p.words.length ? p.words : [{ km: p.km, ro: p.ro, zh: p.zh }]; }
+function kmSpans(p, ws) {   // 逐词可点的整句：词之间的空格、问号照原句留着
+  let rest = p.km, out = '';
+  ws.forEach((w, i) => { const span = `<span class="w" data-act="word" data-i="${i}">${esc(w.km)}</span>`, k = rest.indexOf(w.km);
+    if (k < 0) { out += span; return; } out += esc(rest.slice(0, k)) + span; rest = rest.slice(k + w.km.length); });
+  return out + esc(rest);
+}
 function cardHTML(p, extra) {
   const ws = wordsOf(p);
   return `<article class="card ph">
     <p class="zh">${esc(p.zh)}</p>
-    <p class="km" lang="km">${ws.length > 1 ? ws.map((w, i) => `<span class="w" data-act="word" data-i="${i}">${esc(w.km)}</span>`).join('') : esc(p.km)}</p>
+    <p class="km" lang="km">${ws.length > 1 ? kmSpans(p, ws) : esc(p.km)}</p>
     <p class="ro">${esc(p.ro)}</p>
     <div class="btns">
       <button class="b pri" data-act="play">播放</button>
@@ -680,7 +687,7 @@ function viewTr() {
     const p = x.p, ws = wordsOf(p);
     if (i !== active) return `<button class="bub me cmp" data-act="sel" data-i="${i}"><span class="bz">${esc(p.zh)}</span><span class="km" lang="km">${esc(p.km)}</span></button>`;
     return `<div class="bub me ph"><p class="who">我说${p.by ? '（' + esc(p.by) + '翻译）' : ''}${p.staff === 'ok' ? '<span class="tag">员工听懂过</span>' : ''}</p><p class="bz">${esc(p.zh)}</p>
-      <p class="km" lang="km">${ws.length > 1 ? ws.map((w, k) => `<span class="w" data-act="word" data-i="${k}">${esc(w.km)}</span>`).join('') : esc(p.km)}</p>
+      <p class="km" lang="km">${ws.length > 1 ? kmSpans(p, ws) : esc(p.km)}</p>
       <p class="br">${p.ro ? esc(p.ro) : LOADING.has(p) ? '正在准备读音和逐词…' : ''}</p>
       <div class="btns"><button class="b pri" data-act="play">播放</button><button class="b" data-act="slow">慢速</button>${ws.length > 1 ? '<button class="b" data-act="words">逐词</button>' : ''}<button class="b" data-act="show">放大</button><button class="b" data-act="voice">${S.set.voice === 'f' ? '女声' : '男声'}</button></div>
       <div class="gloss" id="gloss"></div><div id="fixBox"></div>

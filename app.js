@@ -101,7 +101,7 @@ const G_PREBUILT = { f: 'Kore', m: 'Puck' };   // 接口文档里写明的自带
 function gKey() { const k = S.set.gKey.trim(); if (!k) throw new AppErr('还没填谷歌密钥', '到"设置"里填上'); return k; }
 async function gErr(r, what) {
   let body = ''; try { body = await r.text(); } catch (e) {}
-  let msg = body, st = ''; try { const j = JSON.parse(body).error; msg = j.message; st = j.status || ''; } catch (e) {}
+  let msg = body, st = ''; try { let j = JSON.parse(body); if (Array.isArray(j)) j = j[0]; j = j.error; msg = j.message; st = j.status || (typeof j.code === 'string' ? j.code : ''); } catch (e) {}
   let zh = '谷歌' + what + '失败';
   if (/API key not valid|API_KEY_INVALID/i.test(body)) zh = '谷歌密钥不对';
   else if (r.status === 429) zh = '谷歌调用太频繁，或者免费额度用完了';
@@ -130,7 +130,7 @@ function gText(j) {
     if (t) return t;
   }
   const c = j && j.candidates && j.candidates[0];
-  if (c && c.content && c.content.parts) return c.content.parts.map(p => p.text || '').join('');
+  if (c && c.content && c.content.parts) return c.content.parts.filter(p => !p.thought).map(p => p.text || '').join('');
   return '';
 }
 function b64ToBuf(b64) { const s = atob(b64), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }
@@ -180,19 +180,25 @@ async function gStt(wav, lang) {
   } catch (e) {
     if (!(e.http === 400 || e.http === 404) || /API key/i.test(e.raw || '')) throw e;
     console.warn('专用听写型号不接受这种请求，改用通用型号听写', e); via = '通用型号（专用听写型号拒绝了：' + String(e.raw || e.detail || '').slice(0, 120) + '）';   // 专用听写型号的这种调用方式文档没写全，不行就退回通用型号
-    j = await gPost('interactions', { model: S.set.gModel,
-      system_instruction: `你是听写员。把录音里说的话一字不差地写下来，用${zh ? '简体中文' : '高棉文'}。只输出听到的原话，不要翻译、不要解释、不要补充、不要纠正说话人的错误。如果没有人说话或者完全听不清，只输出一个空格。`,
-      input: [{ type: 'text', text: '请听写这段录音。' }, audioPart] }, '听写');
+    j = { output_text: await gGen(`你是听写员。把录音里说的话一字不差地写下来，用${zh ? '简体中文' : '高棉文'}。只输出听到的原话，不要翻译、不要解释、不要补充、不要纠正说话人的错误。如果没有人说话或者完全听不清，只输出一个空格。`,
+      [{ inlineData: { mimeType: 'audio/wav', data } }, { text: '请听写这段录音。' }], '听写', true) };
   }
   const text = gText(j).trim();
   return { ok: !!text, status: text ? 'Success' : '没有听到内容', text, alts: text ? [text] : [], via };
 }
-async function gemini(system, user) {
-  const j = await gPost('interactions', { model: S.set.gModel, system_instruction: system, input: user }, '翻译');
+/* 通用型号（翻译、边听边翻）：走 generateContent 接口，思考档位调到"低"。
+ * 2026-11-13 用真密钥实测：同一句话走新的 interactions 接口要 5~35 秒，走这个接口 2~3 秒；默认档位会先"想"一千多字，又慢又多花钱。 */
+async function gGen(system, parts, what, emptyOk) {
+  const path = 'models/' + S.set.gModel + ':generateContent';
+  const body = { systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts }], generationConfig: { thinkingConfig: { thinkingLevel: 'low' } } };
+  let j;
+  try { j = await gPost(path, body, what); }
+  catch (e) { if (e.http !== 400 || !/thinking/i.test(e.raw || '')) throw e; delete body.generationConfig; j = await gPost(path, body, what); }   // 这个型号不认"思考档位"就不带
   const t = gText(j);
-  if (!t) throw new AppErr('谷歌没有返回文字', JSON.stringify(j).slice(0, 300));
+  if (!t && !emptyOk) throw new AppErr('谷歌没有返回文字', JSON.stringify(j).slice(0, 300));
   return t;
 }
+const gemini = (system, user) => gGen(system, [{ text: user }], '翻译');
 
 /* ---------- 统一入口：按设置决定用哪家 ---------- */
 const useAz = () => S.set.speech === 'azure';
@@ -405,6 +411,64 @@ async function translate(zh, prev, engine) {
   return { zh, km: String(j.km).trim(), ro: String(j.ro || ''), words, back: String(j.back || ''), note: String(j.note || ''), tip: String(j.tip || ''), by: who, ts: Date.now(), uses: 0, staff: null };
 }
 
+/* ---------- 快速通道（翻译交给谷歌时用）：先只要一句高棉语马上念出来，逐词和读音随后再补 ---------- */
+function jsonOf(raw, who) { try { return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch (e) { throw new AppErr(who + '回的内容格式不对，再试一次', raw.slice(0, 300)); } }
+const SYS_HEAD = SYS.slice(0, SYS.indexOf('读音提示 ro 的写法'));   // 身份 + 翻译要求
+const RO_RULES = SYS.slice(SYS.indexOf('读音提示 ro 的写法'), SYS.indexOf('只输出一个 JSON'));
+const SYS_FAST = SYS_HEAD + '只输出翻好的那一句高棉文，不加句号，不要任何别的文字、解释、引号或读音。如果原话不是一句要翻译的话，只输出一个空格。';
+const SYS_ZH_AUDIO = SYS_HEAD + `这次他的中文是一段录音。先一字不差听写出他说的中文，再按上面的要求翻成高棉语。
+只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"zh":"听到的中文原话","km":"整句高棉文，不加句号"}
+如果录音里没有人说话或者完全听不清，zh 和 km 都留空。`;
+const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面是一句中文，和已经定下来的高棉语口语译文。不要改译文，只给它配上逐词拆分和读音，方便一个只会汉语拼音的中国人照着念、核对意思。
+
+` + RO_RULES + `只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
+{"words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思","note":"译文和中文原话意思有出入、或者有需要提醒老板的事就写在这里，没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
+words 里每个词的 km 按顺序直接拼起来必须正好等于整句译文（空格不算）。`;
+const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是一位柬埔寨员工对中国老板说的一句高棉语口语。老板做饮料自动贩卖机生意。
+
+要求：
+1. 先把听到的高棉语一字不差写成高棉文，再翻成自然、简短的中文口语，让老板一眼看懂。
+2. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
+3. 听不清、或者拿不准他说的是什么时，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
+4. 如果录音里没有人说话，km 和 zh 都留空。
+
+只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
+const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
+const audioParts = async wav => [{ inlineData: { mimeType: 'audio/wav', data: await blobToB64(wav) } }, { text: '请听这段录音。' }];
+function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words: [], back: '', note: '', tip: '', by: '谷歌', ts: Date.now(), uses: 0, staff: null }; }
+async function quickKm(zh, prev) {
+  let user = '中文原话：' + zh;
+  if (prev) user += `\n\n上一次的译法是「${prev}」，本地员工没听懂或者觉得不自然。请换一种更口语、更简单的说法。`;
+  const km = (await gGen(SYS_FAST, [{ text: user }], '翻译', true)).trim().replace(/^["'「“]+|["'」”。។]+$/g, '');
+  if (!isKm(km)) throw new AppErr('谷歌没给出高棉文，再试一次', km.slice(0, 300));
+  return km;
+}
+async function hearZh(wav) {   // 听中文录音，一步出中文原话和高棉语
+  const j = jsonOf(await gGen(SYS_ZH_AUDIO, await audioParts(wav), '听和翻译'), '谷歌');
+  return { zh: String(j.zh || '').trim(), km: String(j.km || '').trim() };
+}
+async function hearKm(wav) {   // 听高棉语录音，一步出高棉文和中文意思
+  const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav), '听和翻译'), '谷歌');
+  return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), sure: j.sure !== false, note: String(j.note || '') };
+}
+async function fillDetail(p) {
+  const j = jsonOf(await gGen(SYS_DETAIL, [{ text: '中文原话：' + p.zh + '\n高棉语译文：' + p.km }], '逐词拆分'), '谷歌');
+  let words = Array.isArray(j.words) ? j.words.filter(w => w && isKm(w.km)).map(w => ({ km: String(w.km).trim(), ro: String(w.ro || ''), zh: String(w.zh || '') })) : [];
+  if (normKm(words.map(w => w.km).join('')) !== normKm(p.km)) words = [];   // 拆词对不上整句就不用，不硬凑
+  p.words = words; p.ro = String(j.ro || ''); p.back = String(j.back || ''); p.note = String(j.note || ''); p.tip = String(j.tip || '');
+  return p;
+}
+const LOADING = new WeakSet(); let trRefresh = null;
+function addDetail(p) {   // 不挡着出声：后台补逐词和读音，补好了刷新一下翻译页
+  if (LOADING.has(p)) return;
+  LOADING.add(p);
+  fillDetail(p).catch(e => console.warn('逐词和读音没取到', e)).then(async () => {
+    LOADING.delete(p);
+    try { await idb('phrases', 'readwrite', s => s.put(p, normZh(p.zh))); } catch (e) { console.warn(e); }
+    save(); if (TAB === 'tr' && trRefresh) trRefresh(p);
+  });
+}
+
 /* ---------- 句子卡片（翻译结果和学新句共用） ---------- */
 let CUR = null;   // 当前屏幕上那张卡片对应的句子
 function wordsOf(p) { return p.words && p.words.length ? p.words : [{ km: p.km, ro: p.ro, zh: p.zh }]; }
@@ -498,11 +562,11 @@ function viewTr() {
     if (i !== active) return `<button class="bub me cmp" data-act="sel" data-i="${i}"><span class="bz">${esc(p.zh)}</span><span class="km" lang="km">${esc(p.km)}</span></button>`;
     return `<div class="bub me ph"><p class="who">我说${p.by ? '（' + esc(p.by) + '翻译）' : ''}${p.staff === 'ok' ? '<span class="tag">员工听懂过</span>' : ''}</p><p class="bz">${esc(p.zh)}</p>
       <p class="km" lang="km">${ws.length > 1 ? ws.map((w, k) => `<span class="w" data-act="word" data-i="${k}">${esc(w.km)}</span>`).join('') : esc(p.km)}</p>
-      <p class="br">${esc(p.ro)}</p>
+      <p class="br">${p.ro ? esc(p.ro) : LOADING.has(p) ? '正在准备读音和逐词…' : ''}</p>
       <div class="btns"><button class="b pri" data-act="play">播放</button><button class="b" data-act="slow">慢速</button>${ws.length > 1 ? '<button class="b" data-act="words">逐词</button>' : ''}<button class="b" data-act="show">放大</button><button class="b" data-act="voice">${S.set.voice === 'f' ? '女声' : '男声'}</button></div>
       <div class="gloss" id="gloss"></div>
       ${p.back ? `<p class="bnote">直译回中文：${esc(p.back)}</p>` : ''}${p.note ? `<p class="bnote">提醒：${esc(p.note)}</p>` : ''}${p.tip ? `<p class="bnote">发音：${esc(p.tip)}</p>` : ''}
-      <div class="btns"><button class="lk" data-act="staffOk">员工听懂了</button><button class="lk" data-act="retry">没听懂，换个说法</button></div></div>`;
+      <div class="btns"><button class="lk" data-act="staffOk">员工听懂了</button><button class="lk" data-act="retry">没听懂，换个说法</button>${!p.ro && !p.back && !LOADING.has(p) && fastOn() ? '<button class="lk" data-act="detail">补上读音和逐词</button>' : ''}</div></div>`;
   }
   function render() {
     const items = log.map(bubble);
@@ -512,17 +576,22 @@ function viewTr() {
     CUR = active >= 0 && log[active] ? log[active].p : null;
     requestAnimationFrame(() => window.scrollTo(0, document.documentElement.scrollHeight));
   }
-  async function sendZh(zh, prev, at) {
+  trRefresh = p => { if (log.some(x => x.p === p)) render(); };
+  async function sendZh(zh, prev, at, km0) {   // km0：录音那一步已经顺手翻好的高棉语
     zh = zh.trim(); if (!zh) return;
     const k = normZh(zh);
     pend = { side: 'me', text: '正在翻译：' + zh }; err = null; render();
     try {
-      let p = prev ? null : await idb('phrases', 'readonly', s => s.get(k));
-      if (!p) p = await translate(zh, prev);
+      let p = prev ? null : await idb('phrases', 'readonly', s => s.get(k)), fresh = false;
+      if (!p) {
+        if (fastOn()) { p = basePhrase(zh, km0 && isKm(km0) ? km0 : await quickKm(zh, prev)); fresh = true; }
+        else p = await translate(zh, prev);
+      }
       p.uses = (p.uses || 0) + 1; p.last = Date.now();
       await idb('phrases', 'readwrite', s => s.put(p, k));
       if (at != null) log[at] = { t: 'me', p }; else log.push({ t: 'me', p });
       active = at != null ? at : log.length - 1;
+      if (fresh) addDetail(p);
       pend = null; persist(); render();
       await say(p.km);
     } catch (e) { setErr('me', e); }
@@ -530,6 +599,12 @@ function viewTr() {
   async function sendKm(wav) {
     pend = { side: 'st', text: '正在听他说的话…' }; err = null; render();
     try {
+      if (fastOn() && !useAz()) {   // 谷歌一步到位：边听边翻
+        const d = await hearKm(wav);
+        if (!d.km && !d.zh) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '');
+        log.push({ t: 'st', km: d.km, zh: d.zh || '（没翻出来）', sure: d.sure && !!d.zh, note: d.note }); pend = null; persist(); render();
+        return;
+      }
       const r = await stt(wav, 'km-KH');
       if (!r.ok) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '接口返回：' + r.status);
       pend = { side: 'st', text: '正在翻成中文…', km: r.text }; render();
@@ -538,8 +613,12 @@ function viewTr() {
     } catch (e) { setErr('st', e); }
   }
   bindHold($('#hZh'), { error: e => setErr('me', e), info: t => { pend = { side: 'me', text: t }; err = null; render(); }, done: async wav => {
-    pend = { side: 'me', text: '正在听写…' }; err = null; render();
-    try { const r = await stt(wav, 'zh-CN'); if (!r.ok) throw new AppErr('没听清你说的中文，离手机近一点再说一次', '接口返回：' + r.status); await sendZh(r.text); } catch (e) { setErr('me', e); }
+    const fast = fastOn() && !useAz();
+    pend = { side: 'me', text: fast ? '正在听并翻译…' : '正在听写…' }; err = null; render();
+    try {
+      if (fast) { const d = await hearZh(wav); if (!d.zh) throw new AppErr('没听清你说的中文，离手机近一点再说一次', ''); await sendZh(d.zh, null, null, d.km); }
+      else { const r = await stt(wav, 'zh-CN'); if (!r.ok) throw new AppErr('没听清你说的中文，离手机近一点再说一次', '接口返回：' + r.status); await sendZh(r.text); }
+    } catch (e) { setErr('me', e); }
   } });
   bindHold($('#hKm'), { error: e => setErr('st', e), info: t => { pend = { side: 'st', text: t }; err = null; render(); }, done: sendKm });
   $('#typed').addEventListener('submit', e => { e.preventDefault(); const v = $('#zhIn').value; $('#zhIn').value = ''; sendZh(v); });
@@ -549,6 +628,7 @@ function viewTr() {
     show: () => openShow(CUR.km),
     staffOk: async () => { CUR.staff = 'ok'; await idb('phrases', 'readwrite', s => s.put(CUR, normZh(CUR.zh))); persist(); render(); },
     retry: () => sendZh(CUR.zh, CUR.km, active),
+    detail: () => { addDetail(CUR); render(); },
     kb: () => { const f = $('#typed'); f.hidden = !f.hidden; if (!f.hidden) $('#zhIn').focus(); },
     clr: b => { if (!b.dataset.sure) { b.dataset.sure = 1; b.textContent = '再点一次清空'; return; } log = []; active = -1; err = null; persist(); delete b.dataset.sure; b.textContent = '清空对话'; render(); },
     phr: async () => {
@@ -887,12 +967,19 @@ async function viewSet() {
         catch (e) { console.error(e); add(false, title, (e.zh || '程序出错') + '\u3000' + (e.detail || (e.zh ? '' : String(e && (e.stack || e))))); }
       };
       const KM = 'ថ្ងៃនេះទៅដាក់ទឹកនៅម៉ាស៊ីន', ZH = '今天去给机器补饮料';
-      let kmBuf = null;
+      let kmBuf = null, zhBuf = null;
       await step('念高棉语，女声 ' + voiceName('f'), async () => { kmBuf = await ttsFetch(KM, 'f', false); return '收到 ' + kmBuf.byteLength + ' 字节的声音' + (S.set.voiceNote ? '。' + S.set.voiceNote : ''); });
       await step('念高棉语，男声 ' + voiceName('m'), async () => { const x = await ttsFetch(KM, 'm', false); return '收到 ' + x.byteLength + ' 字节的声音' + (S.set.voiceNote ? '。' + S.set.voiceNote : ''); });
       if (!useAz()) {
         if (kmBuf) await step('听高棉语（把刚才念的那句听回来）', async () => { const r = await stt(new Blob([kmBuf], { type: 'audio/wav' }), 'km-KH'); if (!r.ok) throw new AppErr('没听出内容', r.status + '\u3000走的是' + r.via); return '原句：' + KM + '\u3000听到：' + r.text + (normKm(r.text) === normKm(KM) ? '\u3000一字不差' : '\u3000和原句不完全一样') + '\u3000走的是' + r.via; });
-        await step('听中文（先念一句中文，再听回来）', async () => { const z = await ttsFetch(ZH, 'f', false); const r = await stt(new Blob([z], { type: 'audio/wav' }), 'zh-CN'); if (!r.ok) throw new AppErr('没听出内容', r.status + '\u3000走的是' + r.via); return '原句：' + ZH + '\u3000听到：' + r.text + '\u3000走的是' + r.via; });
+        await step('听中文（先念一句中文，再听回来）', async () => { const z = zhBuf = await ttsFetch(ZH, 'f', false); const r = await stt(new Blob([z], { type: 'audio/wav' }), 'zh-CN'); if (!r.ok) throw new AppErr('没听出内容', r.status + '\u3000走的是' + r.via); return '原句：' + ZH + '\u3000听到：' + r.text + '\u3000走的是' + r.via; });
+      }
+      if (!useAz() && fastOn()) {   // 对话页实际走的路：谷歌边听边翻，先出一句、再补逐词
+        if (kmBuf) await step('对话用：直接听高棉语并翻成中文', async () => { const d = await hearKm(new Blob([kmBuf], { type: 'audio/wav' })); if (!d.km && !d.zh) throw new AppErr('没听出内容', ''); return '原句：' + KM + '\u3000听到：' + d.km + (normKm(d.km) === normKm(KM) ? '\u3000一字不差' : '\u3000和原句不完全一样') + '\u3000中文：' + d.zh + (d.sure ? '' : '\u3000（它说拿不准：' + d.note + '）'); });
+        if (zhBuf) await step('对话用：直接听中文并翻成高棉语', async () => { const d = await hearZh(new Blob([zhBuf], { type: 'audio/wav' })); if (!d.zh) throw new AppErr('没听出内容', ''); return '听到：' + d.zh + ' → ' + d.km; });
+        let qk = '';
+        await step('对话用：打字翻译，先出一句高棉语', async () => { qk = await quickKm(ZH); return ZH + ' → ' + qk; });
+        if (qk) await step('对话用：随后补上逐词和读音', async () => { const p = await fillDetail(basePhrase(ZH, qk)); return '读音：' + p.ro + '\u3000直译回中文：' + p.back + (p.words.length ? '' : '\u3000（逐词拆分和整句对不上，这句没用上逐词）'); });
       }
       for (const en of [['gemini', S.set.gKey], ['claude', S.set.clKey]].filter(x => x[1]).map(x => x[0]))
         await step(engineName(en) + '：中文翻高棉语', async () => { const p = await translate(ZH, null, en); return ZH + ' → ' + p.km + '\u3000直译回中文：' + p.back + (p.words.length ? '' : '\u3000（逐词拆分和整句对不上，这句没用上逐词）'); });

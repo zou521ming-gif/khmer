@@ -682,14 +682,7 @@ function keyWarn() {
 }
 
 /* ================= 功能一：对话翻译（双向，按住说话） ================= */
-/* 实时翻译（试用）：不用按，两个人直接说。用谷歌的实时同传型号，一条连接只往一种语言翻，所以同时开两条：一条翻成高棉语，一条翻成中文；
-   说的话本来就是目标语言时，那条连接不出声。2026-11-13 用机器念的声音实测：目标写 zh 时中文进去不出声，写 zh-Hans 会把中文原样再念一遍，所以用 zh。
-   不给它讲清楚是什么生意，它会把"给机器补货"听成"给鸡去捕获"，所以一定要带说明。密钥不放进连接地址，先换一个只能用一次的临时通行证。 */
-const LIVE_MODEL = 'models/gemini-3.5-live-translate-preview';
-const LIVE_WS = 'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=';
-const liveSys = () => '说话的人一个是在柬埔寨做饮料自动贩卖机生意的中国老板，一个是他的柬埔寨本地员工，两个人面对面说话。常说的事情：给机器补货、收钱、修机器、送货。翻成对方平时说的口语，意思要准，问句还是问句。\n\n' + trExtra();
 const HAS_KM = /[\u1780-\u17FF]/, HAS_ZH = /[\u4E00-\u9FFF]/;   // 这段字里有没有高棉文、有没有汉字
-const i16b64 = a => { const u = new Uint8Array(a.buffer, a.byteOffset, a.byteLength); let t = ''; for (let i = 0; i < u.length; i += 0x8000) t += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(t); };
 const MIC_SVG = '<svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>';
 const SYS_KM = `你是精通高棉语和中文的口译员。下面是一位柬埔寨员工对中国老板说的一句高棉语口语，是语音识别出来的文字，可能有同音错字、漏字、断词错误。老板做饮料自动贩卖机生意。
 
@@ -715,7 +708,7 @@ function viewTr() {
     <div class="dock"><div class="in">
       <form class="typed" id="typed" hidden><input id="zhIn" placeholder="打中文，比如：去给机器补饮料" autocomplete="off"><button class="b pri">翻译</button></form>
       <div class="tools" style="gap:6px"><select class="pill" id="addrSel" aria-label="对方是谁，决定用什么称呼" style="padding:6px 8px;max-width:128px">${ADDRS.map(a => `<option value="${a[0]}" ${a[0] === (S.set.addr || '') ? 'selected' : ''}>对方：${a[1]}</option>`).join('')}</select><button class="pill" data-act="phr">常用句</button><button class="pill" data-act="kb">打字</button><button class="pill" data-act="clr">清空对话</button></div>
-      ${location.hash === '#live' ? '<button class="pill" id="liveBtn" data-act="live" style="width:100%;margin:8px 0 12px"></button>' : ''}<!-- 实时翻译还不可靠（员工说高棉语那个方向会出错），先藏起来，网址后面加 #live 才显示 -->
+      <button class="pill" id="liveBtn" data-act="live" style="width:100%;margin:8px 0 12px"></button>
       <div class="talk2">
         <div class="talker"><button class="hold kmb" id="hKm" aria-label="员工按住说高棉语">${MIC_SVG}</button><span class="l1 km" lang="km">ខ្មែរ</span><span class="l2">员工按住说高棉语</span></div>
         <div class="talker"><button class="hold zhb" id="hZh" aria-label="我按住说中文">${MIC_SVG}</button><span class="l1">中文</span><span class="l2">我按住说，松开翻译</span></div>
@@ -790,117 +783,81 @@ function viewTr() {
       log.push({ t: 'st', km: r.text, zh: j.zh, lit: j.lit, sure: j.sure, note: j.note, at: Date.now() }); pend = null; persist(); render();
     } catch (e) { setErr('st', e); }
   }
-  /* ---- 实时翻译（试用） ---- */
-  const live = { on: false, starting: false, ws: [], pcm: new Int16Array(0), timer: 0, ctx: null, node: null, proc: null, playEnd: 0, played: 0, lastVoice: 0, t0: 0, cur: {} };
+  /* ---- 免按模式：一直听着，有人开口就开始录，停顿 0.8 秒就当这句说完，整句拿去翻；机器念的时候不听。
+     2026-11-13 第一版用的是谷歌"边听边翻"的同传型号，小黑实测：人没说完就翻、慢、周围声音也被翻。所以改成等整句说完再翻，
+     翻译用的还是按住说话那一套（准），只是不用按、自己认是中文还是高棉语。 ---- */
+  const live = { on: false, starting: false, pcm: new Int16Array(0), timer: 0, ctx: null, node: null, proc: null, seg: null, pre: [], hot: 0, floor: 0.004, speaking: false, chain: Promise.resolve(), lastVoice: 0, segs: 0 };
   window.__km.live = live;
   window.__km.liveFeed = a => { const o = new Int16Array(live.pcm.length + a.length); o.set(live.pcm); o.set(a, live.pcm.length); live.pcm = o; };   // 调试用：不经过麦克风，直接塞一段声音进去
   const paintLive = () => { const b = $('#liveBtn'); if (!b) return; const on = live.on || live.starting;
-    b.textContent = live.on ? '实时翻译开着 · 点这里停止' : live.starting ? '正在接通… 点这里取消' : '实时翻译（试用）：点一下开始，两个人直接说，不用按';
+    b.textContent = live.on ? '免按模式开着 · 点这里停止' : live.starting ? '正在打开麦克风…' : '免按模式（试用）：点一下开始，两个人直接说，说完停一下就翻';
     b.style.background = on ? '#e5484d' : ''; b.style.color = on ? '#fff' : '';
     ['#hZh', '#hKm'].forEach(q => { const h = $(q); if (h) { h.disabled = on; h.style.opacity = on ? '.35' : ''; } }); fit(); };
-  const liveWant = t => t === 'km' ? 'zh' : 'km';   // 翻成高棉语的那条该听中文，翻成中文的那条该听高棉语
-  const liveValid = (t, c) => (c.v || c.own) === liveWant(t);
-  function liveShow() {   // 正在说的这一句，边出边显示
+  const liveHint = t => { if (!live.on) return; pend = { side: 'me', text: t || '免按模式开着：直接说，说完停一下就翻。机器念的时候先别说话。' }; err = null; render(); };
+  async function liveDo(wav) {   // 一整句录好了：同时按"是中文"和"是高棉语"各听一遍，看它自己说是哪种话，用对的那个
     if (!live.on) return;
-    const a = live.cur.km, b = live.cur.zh;
-    if (a && a.outT && liveValid('km', a)) pend = { side: 'me', km: a.outT, text: a.inT };
-    else if (b && b.outT && liveValid('zh', b)) pend = { side: 'st', km: b.inT, text: b.outT };
-    else pend = { side: 'me', text: '实时翻译开着：直接说话，不用按。机器念译文的时候先别说话。' + (((b && b.inT) || (a && a.inT)) ? '\u3000听到：' + ((b && b.inT) || a.inT) : '') };
-    err = null; render();
+    liveHint('正在翻译…');
+    try {
+      const [k, z] = await Promise.all([hearKm(wav, null, ctxOf()).catch(e => ({ fail: e })), hearZh(wav).catch(e => ({ fail: e }))]);
+      if (!live.on) return;
+      if (k.fail && z.fail) throw k.fail;
+      if (!k.fail && k.lang === 'km' && k.km && k.zh) {   // 员工说的高棉语：出中文，并且念出来
+        const x = { t: 'st', km: k.km, zh: k.zh, lit: k.lit, sure: k.sure, note: k.note, secs: wavSecs(wav), at: Date.now() }; WAVS.set(x, wav);
+        log.push(x); pend = null; persist(); render();
+        live.speaking = true; try { await say(k.zh); } catch (e) { console.warn(e); } finally { live.speaking = false; }
+      } else if (!z.fail && z.zh && HAS_ZH.test(z.zh) && (k.fail || k.lang === 'zh')) {   // 我说的中文：出高棉语并念出来
+        live.speaking = true; try { await sendZh(z.zh, null, null, z.km); } finally { live.speaking = false; }
+      }   // 两边都不认（杂音、别的语言）：不出气泡
+    } catch (e) { setErr('me', e); return; }
+    liveHint();
   }
-  function liveFlush(t) {   // 一句说完（1.8 秒没有新内容）：该算数的变成正式的气泡
-    const c = live.cur[t]; if (!c) return; clearTimeout(c.tm); delete live.cur[t];
-    const out = c.outT.trim(), ok = liveValid(t, c);
-    if (ok) c.hold.forEach(livePlay);
-    if (t === 'zh') live.lang = '';
-    if (out && ok) {
-      if (t === 'km') { const p = basePhrase(c.inT.trim() || '（没记下中文）', out); p.by = '谷歌实时'; log.push({ t: 'me', p, at: Date.now() }); active = log.length - 1; }
-      else log.push({ t: 'st', km: c.inT.trim(), zh: out, sure: true, note: '', at: Date.now() });
-      persist();
-    }
-    liveShow();
-  }
-  function livePlay(b64) {   // 译文的声音是一小段一小段来的，排着队播；全是静音的小段不播
-    let buf = b64ToBuf(b64); if (buf.byteLength % 2) buf = buf.slice(0, buf.byteLength - 1);
-    const a = new Int16Array(buf); if (!live.ctx || !a.length) return;
-    let m = 0; for (let i = 0; i < a.length; i += 8) m += Math.abs(a[i]);
-    if (m / Math.ceil(a.length / 8) < 120) return;
-    const ab = live.ctx.createBuffer(1, a.length, 24000), f = ab.getChannelData(0); for (let i = 0; i < a.length; i++) f[i] = a[i] / 32768;
-    const src = live.ctx.createBufferSource(); src.buffer = ab; src.connect(live.ctx.destination);
-    const at = Math.max(live.ctx.currentTime + 0.03, live.playEnd); src.start(at); live.playEnd = at + ab.duration; live.played += ab.duration;
-  }
-  /* 两条连接听到的是同一段声音，但只有一条该出声。实测（2026-11-13，机器念的声音）：
-     翻成中文的那条，听写一直是照实写的（中文写中文，高棉语写高棉文），但听到中文时会把中文原样再念一遍；
-     翻成高棉语的那条，听到高棉语时会把"听到的话"写成中文，再把高棉语念回来。
-     所以让翻成中文的那条当裁判：它听写出来的是汉字，这句就是中文，只用翻成高棉语那条的结果；是高棉文，就只用翻成中文那条的结果。
-     裁判还没出结果时，两条的声音都先留着不播；裁判一直没结果，才退回去看各自听写出来的字。 */
-  function liveMsg(t, j) {
-    const sc = j.serverContent; if (!sc || !live.on) return;
-    const it = sc.inputTranscription, ot = sc.outputTranscription, parts = (sc.modelTurn || {}).parts || [];
-    const itx = (it && it.text) || '', otx = (ot && ot.text) || '';
-    if (!itx && !otx && !parts.length) return;
-    const lang = HAS_KM.test(itx) ? 'km' : HAS_ZH.test(itx) ? 'zh' : '';
-    if (t === 'zh' && lang && lang !== live.lang) {   // 裁判说换了一种话：前一句先结掉，再开始新的一句
-      if (live.lang) Object.keys(live.cur).forEach(liveFlush);
-      live.lang = lang;
-      Object.keys(live.cur).forEach(k => { const x = live.cur[k]; x.v = lang; if (lang === liveWant(k)) x.hold.forEach(livePlay); x.hold = []; });
-    }
-    const c = live.cur[t] || (live.cur[t] = { own: '', inT: '', outT: '', v: '', hold: [] });
-    if (live.lang) c.v = live.lang;
-    if (itx) { c.inT += itx; if (lang) c.own = lang; }
-    if (otx) c.outT += otx;
-    for (const p of parts) { const d = p.inlineData || p.inline_data; if (!d || !d.data) continue; if (c.v) { if (c.v === liveWant(t)) livePlay(d.data); } else { c.hold.push(d.data); if (c.hold.length > 16) c.hold.shift(); } }
-    if (itx || otx) { live.lastVoice = Date.now(); clearTimeout(c.tm); c.tm = setTimeout(() => liveFlush(t), 1800); liveShow(); }
-  }
-  function liveOpen(t, sys) {   // 接通一条连接，谷歌回"准备好了"才算数
-    return new Promise((res, rej) => {
-      gPost('auth_tokens', { uses: 1, expireTime: new Date(Date.now() + 30 * 60000).toISOString(), newSessionExpireTime: new Date(Date.now() + 60000).toISOString() }, '实时翻译').then(tok => {
-        const ws = new WebSocket(LIVE_WS + tok.name); let ok = false;
-        const to = setTimeout(() => { if (!ok) { try { ws.close(); } catch (e) {} rej(new AppErr('实时翻译没接通，再试一次', '等了 12 秒谷歌没有回应')); } }, 12000);
-        ws.onopen = () => ws.send(JSON.stringify({ setup: { model: LIVE_MODEL, systemInstruction: { parts: [{ text: sys }] }, inputAudioTranscription: {}, outputAudioTranscription: {}, generationConfig: { responseModalities: ['AUDIO'], translationConfig: { targetLanguageCode: t } } } }));
-        ws.onmessage = async ev => { let j; try { j = JSON.parse(typeof ev.data === 'string' ? ev.data : await ev.data.text()); } catch (e) { return; } if (j.setupComplete) { ok = true; clearTimeout(to); if (!live.starting) { ws.onclose = null; try { ws.close(); } catch (e) {} rej(new AppErr('已取消', '')); return; } live.ws.push(ws); res(ws); return; } liveMsg(t, j); };   // 接通时如果已经点了取消，马上关掉，不留着计费
-        ws.onclose = ev => { clearTimeout(to); const d = '连接被关掉：' + ev.code + ' ' + String(ev.reason || '').slice(0, 200);
-          if (!ok) rej(new AppErr('实时翻译没接通', d)); else if (live.on) liveEnd(new AppErr('实时翻译断开了，要接着用再点一次', d)); };
-      }, rej);
-    });
-  }
-  function liveTick() {   // 每 0.1 秒把刚录到的声音送出去
+  function liveTick() {   // 每 0.1 秒看一眼刚录到的声音
     if (!live.on) return;
-    const fake = !!window.__km.liveFake; let n = Math.min(live.pcm.length, fake ? 1600 : 3200);
+    const fake = !!window.__km.liveFake; let n = fake ? Math.min(live.pcm.length, 1600) : live.pcm.length;
     if (!n) { if (!fake) return; n = 1600; live.pcm = new Int16Array(n); }
-    let chunk = live.pcm.slice(0, n); live.pcm = live.pcm.slice(n);
-    if (live.ctx.currentTime < live.playEnd + 0.4) chunk = new Int16Array(n);   // 机器正在念译文：这一段不送，免得它把自己念的又翻回来
-    const msg = JSON.stringify({ realtimeInput: { audio: { data: i16b64(chunk), mimeType: 'audio/pcm;rate=16000' } } });
-    live.ws.forEach(w => { if (w.readyState === 1) w.send(msg); });
-    if (Date.now() - live.lastVoice > 180000) liveEnd(new AppErr('三分钟没人说话，实时翻译先停了', '开着的时候谷歌按时间收费，所以没人说话就自动停。要用再点一次。'));
-    else if (Date.now() - live.t0 > 25 * 60000) liveEnd(new AppErr('实时翻译已经开了 25 分钟，先停一下', '要接着用再点一次。'));
+    const chunk = live.pcm.slice(0, n); live.pcm = live.pcm.slice(n);
+    if (live.speaking) { live.seg = null; live.pre = []; live.hot = 0; return; }   // 机器正在念：不听，免得把自己念的又翻回来
+    let q = 0; for (let i = 0; i < n; i++) q += chunk[i] * chunk[i];
+    const rms = Math.sqrt(q / n) / 32768, loud = rms > Math.max(0.012, live.floor * 3);
+    live.floor = loud ? live.floor * 0.995 + rms * 0.005 : live.floor * 0.95 + rms * 0.05;   // 环境有多吵，慢慢跟着走；一直很吵的话门槛也跟着抬高
+    const g = live.seg;
+    if (!g) {
+      live.pre.push(chunk); if (live.pre.length > 4) live.pre.shift();   // 留着开口前 0.4 秒，免得第一个字被切掉
+      live.hot = loud ? live.hot + 1 : 0;
+      if (live.hot >= 2) { live.seg = { parts: live.pre.slice(), voiced: 2, quiet: 0, len: live.pre.length }; live.pre = []; live.hot = 0; liveHint('在听…说完停一下'); }
+    } else {
+      g.parts.push(chunk); g.len++; if (loud) { g.voiced++; g.quiet = 0; } else g.quiet++;
+      if (g.quiet >= 8 || g.len >= 250) {   // 停了 0.8 秒，或者一口气说了 25 秒
+        live.seg = null;
+        if (g.voiced >= 4) {   // 有声音的部分不到 0.4 秒：多半是碰了一下、咳一声，不送
+          let m = 0; g.parts.forEach(a => m += a.length); const all = new Int16Array(m); let o = 0; g.parts.forEach(a => { all.set(a, o); o += a.length; });
+          const wav = new Blob([pcmToWav(all.buffer, 16000)], { type: 'audio/wav' }); live.lastVoice = Date.now(); live.segs++;
+          live.chain = live.chain.then(() => liveDo(wav));
+        } else liveHint();
+      }
+    }
+    if (Date.now() - live.lastVoice > 300000) liveEnd(new AppErr('五分钟没人说话，免按模式先停了', '要用再点一次。'));
   }
   function liveEnd(e) {   // 关掉。e 有值就把原因显示出来
-    const was = live.on || live.starting; if (live.starting && !e) live.cancelled = true; live.on = live.starting = false; clearInterval(live.timer);
-    live.ws.forEach(w => { try { w.onclose = null; w.close(); } catch (x) {} }); live.ws = [];
-    Object.keys(live.cur).forEach(liveFlush); live.cur = {};
+    const was = live.on || live.starting; live.on = live.starting = false; clearInterval(live.timer);
     try { if (live.proc) { live.proc.disconnect(); live.node.disconnect(); } if (live.ctx) live.ctx.close(); } catch (x) { console.warn(x); }
-    live.proc = live.node = live.ctx = null; live.pcm = new Int16Array(0);
+    live.proc = live.node = live.ctx = live.seg = null; live.pcm = new Int16Array(0); live.pre = []; live.speaking = false;
     if (was && !Rec.on) { clearTimeout(Rec.idle); Rec.idle = setTimeout(() => Rec.release(), 120000); }
     paintLive();
     if (e) setErr('me', e); else if (was) { pend = null; render(); }
   }
   async function liveStart() {
     if (live.on || live.starting) return;
-    live.starting = true; live.cancelled = false; stopAudio(); paintLive(); pend = { side: 'me', text: '正在接通实时翻译…' }; err = null; render();
+    live.starting = true; stopAudio(); paintLive();
     try {
-      const fake = !!window.__km.liveFake, AC = window.AudioContext || window.webkitAudioContext;
-      live.ctx = new AC(); await live.ctx.resume();   // 要在点按的当下建，苹果手机才让出声
+      const fake = !!window.__km.liveFake;
       if (!fake) {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new AppErr('这个页面现在用不了麦克风', '手机上必须用 https 开头的网址打开才能录音。当前地址：' + location.origin);
         clearTimeout(Rec.idle);
         try { if (!Rec.stream || !Rec.stream.active) Rec.stream = await Rec.open(); }
         catch (e) { throw new AppErr(e.name === 'NotAllowedError' ? '麦克风权限被拒绝了，到浏览器设置里允许这个网页用麦克风' : '打不开麦克风', e.name + ': ' + e.message); }
-      }
-      const sys = liveSys(); live.ws = []; await Promise.all(['km', 'zh'].map(t => liveOpen(t, sys)));
-      if (!live.starting) return;   // 还没接通就被点了取消
-      live.pcm = new Int16Array(0); live.playEnd = 0; live.played = 0; live.cur = {}; live.lang = ''; live.lastVoice = live.t0 = Date.now();
-      if (!fake) {
+        if (!live.starting) return;   // 麦克风还没开好就被点了取消
+        const AC = window.AudioContext || window.webkitAudioContext; live.ctx = new AC(); await live.ctx.resume();
         live.node = live.ctx.createMediaStreamSource(Rec.stream); live.proc = live.ctx.createScriptProcessor(4096, 1, 1);
         const ratio = live.ctx.sampleRate / 16000;
         live.proc.onaudioprocess = ev => { const d = ev.inputBuffer.getChannelData(0), n = Math.floor(d.length / ratio), o = new Int16Array(live.pcm.length + n); o.set(live.pcm);
@@ -908,8 +865,9 @@ function viewTr() {
           live.pcm = o.length > 160000 ? o.slice(-160000) : o; };
         live.node.connect(live.proc); live.proc.connect(live.ctx.destination);
       }
-      live.on = true; live.starting = false; live.timer = setInterval(liveTick, 100); paintLive(); liveShow();
-    } catch (e) { if (live.cancelled) { live.cancelled = false; return; } liveEnd(e instanceof AppErr ? e : new AppErr('实时翻译开不了', String(e && (e.message || e)))); }
+      live.pcm = new Int16Array(0); live.seg = null; live.pre = []; live.hot = 0; live.floor = 0.004; live.speaking = false; live.chain = Promise.resolve(); live.lastVoice = Date.now(); live.segs = 0;
+      live.on = true; live.starting = false; live.timer = setInterval(liveTick, 100); paintLive(); liveHint();
+    } catch (e) { liveEnd(e instanceof AppErr ? e : new AppErr('免按模式开不了', String(e && (e.message || e)))); }
   }
   liveStop = () => liveEnd(); paintLive();
   bindHold($('#hZh'), { error: e => setErr('me', e), cancel: () => { pend = null; render(); }, info: t => { pend = { side: 'me', text: t }; err = null; render(); }, done: async wav => {

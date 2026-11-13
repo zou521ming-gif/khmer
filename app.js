@@ -171,20 +171,18 @@ async function gTts(text, voice) {
     }
   } finally { ttsActive--; const w = ttsWait.shift(); if (w) w(); }
 }
+/* 听写。2026-11-13 用真密钥实测：专用听写型号听高棉语，句尾常混进别种文字的字母；通用型号按"听写员"的要求来听反而一字不差，也更快。
+ * 所以以通用型号为主；高棉语再让专用听写型号听一遍当对照（最多多等 2.5 秒），两个结果都交给"开口"判定用。 */
 async function gStt(wav, lang) {
-  const zh = lang === 'zh-CN', data = await blobToB64(wav), audioPart = { type: 'audio', data, mime_type: 'audio/wav' };
-  let j, via = '专用听写型号';
-  try {
-    j = await gPost('interactions', { model: 'models/gemini-3.5-transcribe', input: [audioPart],
-      generation_config: { transcription_config: { language_codes: [zh ? 'cmn-Hans-CN' : 'km-KH'] } } }, '听写');
-  } catch (e) {
-    if (!(e.http === 400 || e.http === 404) || /API key/i.test(e.raw || '')) throw e;
-    console.warn('专用听写型号不接受这种请求，改用通用型号听写', e); via = '通用型号（专用听写型号拒绝了：' + String(e.raw || e.detail || '').slice(0, 120) + '）';   // 专用听写型号的这种调用方式文档没写全，不行就退回通用型号
-    j = { output_text: await gGen(`你是听写员。把录音里说的话一字不差地写下来，用${zh ? '简体中文' : '高棉文'}。只输出听到的原话，不要翻译、不要解释、不要补充、不要纠正说话人的错误。如果没有人说话或者完全听不清，只输出一个空格。`,
-      [{ inlineData: { mimeType: 'audio/wav', data } }, { text: '请听写这段录音。' }], '听写', true) };
-  }
-  const text = gText(j).trim();
-  return { ok: !!text, status: text ? 'Success' : '没有听到内容', text, alts: text ? [text] : [], via };
+  const zh = lang === 'zh-CN', data = await blobToB64(wav);
+  const main = gGen(`你是听写员。把录音里说的话一字不差地写下来，用${zh ? '简体中文' : '高棉文'}。只输出听到的原话，不要翻译、不要解释、不要补充、不要纠正说话人的错误。如果没有人说话或者完全听不清，只输出一个空格。`,
+    [{ inlineData: { mimeType: 'audio/wav', data } }, { text: '请听写这段录音。' }], '听写', true);
+  const second = zh ? null : gPost('interactions', { model: 'models/gemini-3.5-transcribe', input: [{ type: 'audio', data, mime_type: 'audio/wav' }],
+    generation_config: { transcription_config: { language_codes: ['km-KH'] } } }, '听写').then(j => gText(j).trim(), e => { console.warn('专用听写型号这次没用上', e); return ''; });
+  const text = (await main).trim();
+  const t2 = second ? await Promise.race([second, sleep(2500).then(() => '')]) : '';
+  const alts = [text, t2].filter((t, i, arr) => t && arr.indexOf(t) === i);
+  return { ok: !!alts.length, status: alts.length ? 'Success' : '没有听到内容', text: alts[0] || '', alts, via: t2 ? '通用型号，专用听写型号对照听到：' + t2 : '通用型号' };
 }
 /* 通用型号（翻译、边听边翻）：走 generateContent 接口，思考档位调到"低"。
  * 2026-11-13 用真密钥实测：同一句话走新的 interactions 接口要 5~35 秒，走这个接口 2~3 秒；默认档位会先"想"一千多字，又慢又多花钱。 */
@@ -373,6 +371,7 @@ const SYS = `你是土生土长的金边人，同时精通中文。用户是在�
 - 大写 B、D 表示内爆浊音 ប、ដ。
 - e 表示央元音（像拼音"饿"的 e），ae 表示 ែ，双写元音表示长音，词尾 h 表示送气收尾，词尾 j 表示 ច 收尾。
 - 词与词之间用空格，词内音节用连字符。
+- 只能用普通英文字母 a 到 z、连字符和撇号。绝对不要用 ə、ɔ、ɛ、ɨ、ŋ 这类音标符号，不要加声调符号：央元音一律写 e。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
 {"km":"整句高棉文，不加句号","words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思","note":"需要提醒老板的事，没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
@@ -412,6 +411,7 @@ async function translate(zh, prev, engine) {
 }
 
 /* ---------- 快速通道（翻译交给谷歌时用）：先只要一句高棉语马上念出来，逐词和读音随后再补 ---------- */
+const plainRo = t => String(t || '').replace(/[əɨɯɤ]/g, 'e').replace(/ɔ/g, 'o').replace(/[ɛæ]/g, 'ae').replace(/ŋ/g, 'ng').replace(/ɲ/g, 'ny').replace(/[ʰːˈˌ]/g, '');
 function jsonOf(raw, who) { try { return JSON.parse(raw.slice(raw.indexOf('{'), raw.lastIndexOf('}') + 1)); } catch (e) { throw new AppErr(who + '回的内容格式不对，再试一次', raw.slice(0, 300)); } }
 const SYS_HEAD = SYS.slice(0, SYS.indexOf('读音提示 ro 的写法'));   // 身份 + 翻译要求
 const RO_RULES = SYS.slice(SYS.indexOf('读音提示 ro 的写法'), SYS.indexOf('只输出一个 JSON'));
@@ -422,7 +422,7 @@ const SYS_ZH_AUDIO = SYS_HEAD + `这次他的中文是一段录音。先一字�
 const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面是一句中文，和已经定下来的高棉语口语译文。不要改译文，只给它配上逐词拆分和读音，方便一个只会汉语拼音的中国人照着念、核对意思。
 
 ` + RO_RULES + `只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
-{"words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思","note":"译文和中文原话意思有出入、或者有需要提醒老板的事就写在这里，没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
+{"words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思","note":"只有译文和中文原话意思有出入、或者这句话容易引起误会时才写，一句话说完；没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
 words 里每个词的 km 按顺序直接拼起来必须正好等于整句译文（空格不算）。`;
 const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是一位柬埔寨员工对中国老板说的一句高棉语口语。老板做饮料自动贩卖机生意。
 
@@ -453,9 +453,9 @@ async function hearKm(wav) {   // 听高棉语录音，一步出高棉文和中�
 }
 async function fillDetail(p) {
   const j = jsonOf(await gGen(SYS_DETAIL, [{ text: '中文原话：' + p.zh + '\n高棉语译文：' + p.km }], '逐词拆分'), '谷歌');
-  let words = Array.isArray(j.words) ? j.words.filter(w => w && isKm(w.km)).map(w => ({ km: String(w.km).trim(), ro: String(w.ro || ''), zh: String(w.zh || '') })) : [];
+  let words = Array.isArray(j.words) ? j.words.filter(w => w && isKm(w.km)).map(w => ({ km: String(w.km).trim(), ro: plainRo(w.ro), zh: String(w.zh || '') })) : [];
   if (normKm(words.map(w => w.km).join('')) !== normKm(p.km)) words = [];   // 拆词对不上整句就不用，不硬凑
-  p.words = words; p.ro = String(j.ro || ''); p.back = String(j.back || ''); p.note = String(j.note || ''); p.tip = String(j.tip || '');
+  p.words = words; p.ro = plainRo(j.ro); p.back = String(j.back || ''); p.note = String(j.note || ''); p.tip = String(j.tip || '');
   return p;
 }
 const LOADING = new WeakSet(); let trRefresh = null;

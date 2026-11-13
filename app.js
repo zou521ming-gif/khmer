@@ -353,6 +353,12 @@ const Rec = {
     const secs = outN / 16000;
     if (secs < 0.3) throw new AppErr('要按住不放再说话，说完再松开', '只录到 ' + secs.toFixed(2) + ' 秒');
     if (peak < 0.008) throw new AppErr('没录到声音，检查麦克风有没有被别的 APP 占用或被静音', '最大音量 ' + peak.toFixed(4));
+    /* 2026-11-13 真密钥实测：没人说话的录音交给模型，它会自己编一句出来（"明天才能去""好的"），改提示词拦不住。所以先在这里量一下有没有人声，没有就不送 */
+    const F = 480, rms = [];   // 每 30 毫秒一小段，算这一小段的音量
+    for (let i = 0; i + F <= outN; i += F) { let q = 0; for (let j = i; j < i + F; j++) { const v = pcm[j] / 32768; q += v * v; } rms.push(Math.sqrt(q / F)); }
+    const floor = Math.min(0.02, rms.slice().sort((a, b) => a - b)[Math.floor(rms.length * 0.1)] || 0);   // 最安静那一成的音量当作环境底噪
+    const voiced = rms.filter(v => v > Math.max(0.015, floor * 3)).length * 0.03;
+    if (voiced < 0.18) throw new AppErr('没听到说话声。等按钮变红再开口，离麦克风近一点', '录到 ' + secs.toFixed(1) + ' 秒，其中像人声的只有 ' + voiced.toFixed(2) + ' 秒 · 最大音量 ' + peak.toFixed(3) + (this.micName ? ' · 麦克风：' + this.micName : ''));
     const h = new DataView(new ArrayBuffer(44)), W = (p, s) => { for (let i = 0; i < s.length; i++) h.setUint8(p + i, s.charCodeAt(i)); };
     W(0, 'RIFF'); h.setUint32(4, 36 + pcm.byteLength, true); W(8, 'WAVEfmt '); h.setUint32(16, 16, true); h.setUint16(20, 1, true); h.setUint16(22, 1, true);
     h.setUint32(24, 16000, true); h.setUint32(28, 32000, true); h.setUint16(32, 2, true); h.setUint16(34, 16, true); W(36, 'data'); h.setUint32(40, pcm.byteLength, true);
@@ -482,15 +488,16 @@ const SYS_DETAIL = `你是土生土长的金边人，同时精通中文。下面
 ` + RO_RULES + `只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：
 {"words":[{"km":"一个词","ro":"这个词的读音提示","zh":"这个词的中文意思"}],"ro":"整句读音提示","back":"把高棉语逐词直译回中文，让老板核对意思。称呼对方的词（ប្អូន、បង、ពូ、មីង）在句子里当「你」用时，写成 你（弟妹辈）、你（哥姐辈）、你（叔辈）、你（姨辈），不要只写弟妹、哥姐，words 里这个词的 zh 也这样写","note":"只有译文和中文原话意思有出入、或者这句话容易引起误会时才写，一句话说完；没有就留空","tip":"这句里中国人最难发准的一两个音，用中文讲嘴型舌位怎么摆，没有就留空"}
 words 里每个词的 km 按顺序直接拼起来必须正好等于整句译文（空格不算）。`;
-const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是一位柬埔寨员工对中国老板说的一句高棉语口语。老板做饮料自动贩卖机生意。
+const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音应该是一位柬埔寨员工对中国老板说的一句高棉语口语，但也可能没人说话，或者说的不是高棉语。老板做饮料自动贩卖机生意。
 
 要求：
-1. 先把听到的高棉语一字不差写成高棉文，再翻成自然、简短的中文口语，让老板一眼看懂。
-2. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
-3. 听不清、或者拿不准他说的是什么时，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
-4. 如果录音里没有人说话，km 和 zh 都留空。
+1. 先判断录音里有没有人在说话。只有杂音、呼吸声、敲击声，或者什么声音都没有，speech 填 false，其他都留空。绝对不要编造内容，没听到就是没听到。
+2. lang 填他说的是什么语言：km 高棉语，zh 中文，en 英语，other 其他。
+3. 说的是高棉语：km 里一字不差写成高棉文，zh 翻成自然、简短的中文口语，让老板一眼看懂。说的不是高棉语：km 里用那种语言的文字照原话写下来，zh 仍然写中文意思。
+4. 不要添加原话没有的内容。数字、金额、时间、地点、人名要准确保留。
+5. 听不清、或者拿不准他说的是什么时，sure 填 false，zh 写你认为最可能的意思，note 用中文说明哪里拿不准。拿得准时 sure 填 true，note 留空。
 
-只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
+只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"speech":true,"lang":"km","km":"听到的原话","zh":"中文意思","sure":true,"note":""}`;
 const TR_V = 8;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const trVer = () => { const t = glossText(); let h = 0; for (let i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return TR_V + '|' + h; };   // 固定说法表一改，版本也跟着变
 const phraseKey = zh => normZh(zh) + (S.set.addr ? '@' + S.set.addr : '');
@@ -512,7 +519,9 @@ async function hearZh(wav) {   // 听中文录音，一步出中文原话和高�
 }
 async function hearKm(wav, opt) {   // 听高棉语录音，一步出高棉文和中文意思
   const j = jsonOf(await gGen(SYS_KM_AUDIO, await audioParts(wav), '听和翻译', false, opt), '谷歌');
-  return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), sure: j.sure !== false, note: String(j.note || '') };
+  if (j.speech === false) return { km: '', zh: '', sure: false, note: '' };
+  const lang = String(j.lang || 'km'), other = lang !== 'km' ? '他说的不是高棉语' + ({ en: '，是英语', zh: '，是中文' }[lang] || '') + '。' : '';
+  return { km: String(j.km || '').trim(), zh: String(j.zh || '').trim(), sure: j.sure !== false, note: other + String(j.note || ''), lang };
 }
 async function fillDetail(p) {
   const j = jsonOf(await gGen(sysDetail(), [{ text: '中文原话：' + p.zh + '\n高棉语译文：' + p.km }], '逐词拆分'), '谷歌');
@@ -712,7 +721,7 @@ function viewTr() {
     try {
       if (fastOn() && !useAz()) {   // 谷歌一步到位：边听边翻
         const d = await hearKm(wav);
-        if (!d.km && !d.zh) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '录到 ' + wavSecs(wav) + ' 秒');
+        if (!d.km && !d.zh) throw new AppErr('没听出高棉语，请他离手机近一点再说一次', '录到 ' + wavSecs(wav) + ' 秒，模型说里面没有人在说话');
         const x = { t: 'st', km: d.km, zh: d.zh || '（没翻出来）', sure: d.sure && !!d.zh, note: d.note, secs: wavSecs(wav) }; WAVS.set(x, wav);
         log.push(x); pend = null; persist(); render();
         return;
@@ -1079,7 +1088,7 @@ async function viewSet() {
       ['D 谷歌更强的型号', () => hearKm(wav, { model: 'gemini-pro-latest' })]
     ];
     const rows = ways.map(w => ({ name: w[0] }));
-    const draw = () => { $('#hcRes').innerHTML = rows.map(r => `<div class="tips"><p><b>${esc(r.name)}</b>${r.secs ? '（用时 ' + r.secs + ' 秒）' : ''}</p>${r.err ? errHTML(r.err) : r.d ? `<p class="km" lang="km" style="font-size:22px">${esc(r.d.km || '（没听出来）')}</p><p>${esc(r.d.zh || '')}</p>${r.d.sure === false && r.d.note ? `<p class="sub">它说拿不准：${esc(r.d.note)}</p>` : ''}` : '<p class="sub">正在听…</p>'}</div>`).join(''); };
+    const draw = () => { $('#hcRes').innerHTML = rows.map(r => `<div class="tips"><p><b>${esc(r.name)}</b>${r.secs ? '（用时 ' + r.secs + ' 秒）' : ''}</p>${r.err ? errHTML(r.err) : r.d ? `<p class="km" lang="km" style="font-size:22px">${esc(r.d.km || '（没听出来）')}</p><p>${esc(r.d.zh || '')}</p>${r.d.note ? `<p class="sub">${r.d.sure === false ? '它说拿不准：' : ''}${esc(r.d.note)}</p>` : ''}` : '<p class="sub">正在听…</p>'}</div>`).join(''); };
     draw();
     await Promise.all(ways.map(async (w, i) => { const t0 = Date.now(); try { rows[i].d = await w[1](); } catch (e) { console.error(e); rows[i].err = e; } rows[i].secs = ((Date.now() - t0) / 1000).toFixed(1); draw(); }));
     out('#hcSt', true, '录到 ' + wavSecs(wav) + ' 秒。请员工看下面哪一种写的高棉文是对的，再把这一屏截图发给 Claude。');

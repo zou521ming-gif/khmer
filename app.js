@@ -368,12 +368,19 @@ const Rec = {
 document.addEventListener('visibilitychange', () => { if (document.hidden && location.protocol !== 'file:') Rec.release(); });
 /* 按住说话：按下开始录，松开结束。h.done(wav) 处理录音，h.error(e) 显示原因 */
 function bindHold(btn, h) {
-  let down = false, starting = false, timer = null, tRec = 0;
+  let down = false, starting = false, timer = null, tRec = 0, cancel = false;
   const info = t => { if (h.info) h.info(t); };
+  const recText = () => '正在录音，说完松开。说错了就把手指往上滑开再松手，这次就不算。' + (Rec.micName ? '（麦克风：' + Rec.micName + '）' : '');
+  const setCancel = on => { if (on === cancel) return; cancel = on; btn.style.filter = on ? 'grayscale(1)' : ''; btn.style.opacity = on ? '.6' : ''; info(on ? '现在松手就取消这次录音。不想取消就把手指移回按钮上。' : recText()); };
+  function move(e) {   // 按住的时候手指滑开（往上滑过一个按钮的距离，或者离开按钮很远）= 想取消
+    if (!down || starting || !tRec) return;
+    const r = btn.getBoundingClientRect(), dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+    setCancel(dy < -Math.max(60, r.height * 0.8) || Math.hypot(dx, dy) > Math.max(110, r.width * 1.4));
+  }
   const setRec = on => { btn.classList.toggle('rec', on); btn.classList.remove('arming'); if (!on) btn.style.removeProperty('--lv'); };
   async function start(e) {
     if (btn.disabled || down || Rec.on) return;
-    e.preventDefault(); down = true; starting = true; clearMsg();
+    e.preventDefault(); down = true; starting = true; tRec = 0; cancel = false; clearMsg();
     try { btn.setPointerCapture(e.pointerId); } catch (_) {}
     stopAudio();
     btn.classList.add('arming');   // 一按下就变样，让人知道按到了
@@ -387,16 +394,22 @@ function bindHold(btn, h) {
       return h.error(new AppErr(Date.now() - t0 > 800 ? '麦克风已经允许了。现在按住按钮说话，说完再松开。' : '要按住不放再说话，说完再松开。', ''));
     }
     Rec.onLevel = v => btn.style.setProperty('--lv', Math.min(1, v * 4).toFixed(2));
-    tRec = Date.now(); setRec(true); info('正在录音，说完松开。' + (Rec.micName ? '（麦克风：' + Rec.micName + '）' : '')); timer = setTimeout(end, 30000);
+    tRec = Date.now(); setRec(true); info(recText()); timer = setTimeout(end, 30000);
   }
   async function end() {
     if (!down) return; down = false; clearTimeout(timer);
     if (starting) return;
+    if (cancel) {   // 滑开后松手：这段录音扔掉，什么都不发出去
+      btn.style.filter = ''; btn.style.opacity = ''; cancel = false; setRec(false);
+      try { await Rec.stop(); } catch (_) {}
+      if (h.cancel) h.cancel(); else info('已取消，这次没有发出去。');
+      return;
+    }
     if (Date.now() - tRec >= 350) await sleep(250);   // 松手后再多录四分之一秒，免得最后一个字被切掉
     setRec(false);
     try { const wav = await Rec.stop(); if (wav) await h.done(wav); } catch (err) { h.error(err); }
   }
-  btn.addEventListener('pointerdown', start); btn.addEventListener('pointerup', end); btn.addEventListener('pointercancel', end);
+  btn.addEventListener('pointerdown', start); btn.addEventListener('pointermove', move); btn.addEventListener('pointerup', end); btn.addEventListener('pointercancel', end);
   btn.addEventListener('contextmenu', e => e.preventDefault());
 }
 
@@ -740,7 +753,7 @@ function viewTr() {
       log.push({ t: 'st', km: r.text, zh: j.zh, sure: j.sure, note: j.note }); pend = null; persist(); render();
     } catch (e) { setErr('st', e); }
   }
-  bindHold($('#hZh'), { error: e => setErr('me', e), info: t => { pend = { side: 'me', text: t }; err = null; render(); }, done: async wav => {
+  bindHold($('#hZh'), { error: e => setErr('me', e), cancel: () => { pend = null; render(); }, info: t => { pend = { side: 'me', text: t }; err = null; render(); }, done: async wav => {
     const fast = fastOn() && !useAz();
     pend = { side: 'me', text: fast ? '正在听并翻译…' : '正在听写…' }; err = null; render();
     try {
@@ -748,7 +761,7 @@ function viewTr() {
       else { const r = await stt(wav, 'zh-CN'); if (!r.ok) throw new AppErr('没听清你说的中文，离手机近一点再说一次', '接口返回：' + r.status); await sendZh(r.text); }
     } catch (e) { setErr('me', e); }
   } });
-  bindHold($('#hKm'), { error: e => setErr('st', e), info: t => { pend = { side: 'st', text: t }; err = null; render(); }, done: sendKm });
+  bindHold($('#hKm'), { error: e => setErr('st', e), cancel: () => { pend = null; render(); }, info: t => { pend = { side: 'st', text: t }; err = null; render(); }, done: sendKm });
   $('#typed').addEventListener('submit', e => { e.preventDefault(); const v = $('#zhIn').value; $('#zhIn').value = ''; sendZh(v); });
   ACTS = {
     toSet: () => go('set'),

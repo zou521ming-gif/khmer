@@ -794,6 +794,7 @@ function viewTr() {
     b.style.background = on ? '#e5484d' : ''; b.style.color = on ? '#fff' : '';
     ['#hZh', '#hKm'].forEach(q => { const h = $(q); if (h) { h.disabled = on; h.style.opacity = on ? '.35' : ''; } }); fit(); };
   const liveHint = t => { if (!live.on) return; pend = { side: 'me', text: t || '免按模式开着：直接说，说完停一下就翻。机器念的时候先别说话。' }; err = null; render(); };
+  const liveSpeak = async f => { live.speaking = true; try { await Promise.race([f(), new Promise(r => setTimeout(r, 25000))]); } catch (e) { console.warn(e); } finally { live.speaking = false; } };   // 念的时候不听；万一念不出来，最多 25 秒后照常接着听
   async function liveDo(wav) {   // 一整句录好了：同时按"是中文"和"是高棉语"各听一遍，看它自己说是哪种话，用对的那个
     if (!live.on) return;
     liveHint('正在翻译…');
@@ -804,10 +805,10 @@ function viewTr() {
       if (!k.fail && k.lang === 'km' && k.km && k.zh) {   // 员工说的高棉语：出中文，并且念出来
         const x = { t: 'st', km: k.km, zh: k.zh, lit: k.lit, sure: k.sure, note: k.note, secs: wavSecs(wav), at: Date.now() }; WAVS.set(x, wav);
         log.push(x); pend = null; persist(); render();
-        live.speaking = true; try { await say(k.zh); } catch (e) { console.warn(e); } finally { live.speaking = false; }
+        await liveSpeak(() => say(k.zh));
       } else if (!z.fail && z.zh && HAS_ZH.test(z.zh) && (k.fail || k.lang === 'zh')) {   // 我说的中文：出高棉语并念出来
-        live.speaking = true; try { await sendZh(z.zh, null, null, z.km); } finally { live.speaking = false; }
-      }   // 两边都不认（杂音、别的语言）：不出气泡
+        await liveSpeak(() => sendZh(z.zh, null, null, z.km));
+      } else { liveHint('刚才那段没听出是中文还是高棉语，没有翻。要是有人说了话，请再说一遍。'); return; }   // 两边都不认（杂音、别的语言）：不出气泡，只提示一句
     } catch (e) { setErr('me', e); return; }
     liveHint();
   }

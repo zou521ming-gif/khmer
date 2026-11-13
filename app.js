@@ -798,20 +798,24 @@ function viewTr() {
     b.textContent = live.on ? '实时翻译开着 · 点这里停止' : live.starting ? '正在接通… 点这里取消' : '实时翻译（试用）：点一下开始，两个人直接说，不用按';
     b.style.background = on ? '#e5484d' : ''; b.style.color = on ? '#fff' : '';
     ['#hZh', '#hKm'].forEach(q => { const h = $(q); if (h) { h.disabled = on; h.style.opacity = on ? '.35' : ''; } }); fit(); };
+  const liveWant = t => t === 'km' ? 'zh' : 'km';   // 翻成高棉语的那条该听中文，翻成中文的那条该听高棉语
+  const liveValid = (t, c) => (c.v || c.own) === liveWant(t);
   function liveShow() {   // 正在说的这一句，边出边显示
     if (!live.on) return;
     const a = live.cur.km, b = live.cur.zh;
-    if (a && a.outT) pend = { side: 'me', km: a.outT, text: a.src };
-    else if (b && b.outT) pend = { side: 'st', km: b.src, text: b.outT };
-    else pend = { side: 'me', text: '实时翻译开着：直接说话，不用按。机器念译文的时候先别说话。' + (((a && a.src) || (b && b.src)) ? '\u3000听到：' + ((a && a.src) || b.src) : '') };
+    if (a && a.outT && liveValid('km', a)) pend = { side: 'me', km: a.outT, text: a.inT };
+    else if (b && b.outT && liveValid('zh', b)) pend = { side: 'st', km: b.inT, text: b.outT };
+    else pend = { side: 'me', text: '实时翻译开着：直接说话，不用按。机器念译文的时候先别说话。' + (((b && b.inT) || (a && a.inT)) ? '\u3000听到：' + ((b && b.inT) || a.inT) : '') };
     err = null; render();
   }
-  function liveFlush(t) {   // 一句说完（1.8 秒没有新内容）：变成正式的气泡
+  function liveFlush(t) {   // 一句说完（1.8 秒没有新内容）：该算数的变成正式的气泡
     const c = live.cur[t]; if (!c) return; clearTimeout(c.tm); delete live.cur[t];
-    const out = c.outT.trim();
-    if (out) {
-      if (t === 'km') { const p = basePhrase(c.src.trim() || '（没记下中文）', out); p.by = '谷歌实时'; log.push({ t: 'me', p, at: Date.now() }); active = log.length - 1; }
-      else log.push({ t: 'st', km: c.src.trim(), zh: out, sure: true, note: '', at: Date.now() });
+    const out = c.outT.trim(), ok = liveValid(t, c);
+    if (ok) c.hold.forEach(livePlay);
+    if (t === 'zh') live.lang = '';
+    if (out && ok) {
+      if (t === 'km') { const p = basePhrase(c.inT.trim() || '（没记下中文）', out); p.by = '谷歌实时'; log.push({ t: 'me', p, at: Date.now() }); active = log.length - 1; }
+      else log.push({ t: 'st', km: c.inT.trim(), zh: out, sure: true, note: '', at: Date.now() });
       persist();
     }
     liveShow();
@@ -825,21 +829,28 @@ function viewTr() {
     const src = live.ctx.createBufferSource(); src.buffer = ab; src.connect(live.ctx.destination);
     const at = Math.max(live.ctx.currentTime + 0.03, live.playEnd); src.start(at); live.playEnd = at + ab.duration; live.played += ab.duration;
   }
-  /* 两条连接听到的是同一段声音。实测（2026-11-13）翻成中文的那条听到中文时，有时会把中文原样再念一遍，
-     所以每条只认自己该翻的那种话：翻成高棉语的只认中文，翻成中文的只认高棉语；别的话它出的字和声音都不要。还不知道是哪种话时，声音先留着不播。 */
+  /* 两条连接听到的是同一段声音，但只有一条该出声。实测（2026-11-13，机器念的声音）：
+     翻成中文的那条，听写一直是照实写的（中文写中文，高棉语写高棉文），但听到中文时会把中文原样再念一遍；
+     翻成高棉语的那条，听到高棉语时会把"听到的话"写成中文，再把高棉语念回来。
+     所以让翻成中文的那条当裁判：它听写出来的是汉字，这句就是中文，只用翻成高棉语那条的结果；是高棉文，就只用翻成中文那条的结果。
+     裁判还没出结果时，两条的声音都先留着不播；裁判一直没结果，才退回去看各自听写出来的字。 */
   function liveMsg(t, j) {
     const sc = j.serverContent; if (!sc || !live.on) return;
     const it = sc.inputTranscription, ot = sc.outputTranscription, parts = (sc.modelTurn || {}).parts || [];
-    if (!(it && it.text) && !(ot && ot.text) && !parts.length) return;
-    const c = live.cur[t] || (live.cur[t] = { src: '', outT: '', lang: '', hold: [] }), want = t === 'km' ? 'zh' : 'km';
-    if (it && it.text) {
-      c.lang = HAS_KM.test(it.text) ? 'km' : HAS_ZH.test(it.text) ? 'zh' : String(it.languageCode || c.lang).slice(0, 2);
-      if (c.lang === want) { c.src += it.text; c.hold.forEach(livePlay); } c.hold = [];
+    const itx = (it && it.text) || '', otx = (ot && ot.text) || '';
+    if (!itx && !otx && !parts.length) return;
+    const lang = HAS_KM.test(itx) ? 'km' : HAS_ZH.test(itx) ? 'zh' : '';
+    if (t === 'zh' && lang && lang !== live.lang) {   // 裁判说换了一种话：前一句先结掉，再开始新的一句
+      if (live.lang) Object.keys(live.cur).forEach(liveFlush);
+      live.lang = lang;
+      Object.keys(live.cur).forEach(k => { const x = live.cur[k]; x.v = lang; if (lang === liveWant(k)) x.hold.forEach(livePlay); x.hold = []; });
     }
-    const ok = c.lang === want;
-    if (ot && ot.text && ok) c.outT += ot.text;
-    for (const p of parts) { const d = p.inlineData || p.inline_data; if (!d || !d.data) continue; if (ok) livePlay(d.data); else if (!c.lang) { c.hold.push(d.data); if (c.hold.length > 12) c.hold.shift(); } }
-    if ((it && it.text) || (ot && ot.text)) { live.lastVoice = Date.now(); clearTimeout(c.tm); c.tm = setTimeout(() => liveFlush(t), 1800); liveShow(); }
+    const c = live.cur[t] || (live.cur[t] = { own: '', inT: '', outT: '', v: '', hold: [] });
+    if (live.lang) c.v = live.lang;
+    if (itx) { c.inT += itx; if (lang) c.own = lang; }
+    if (otx) c.outT += otx;
+    for (const p of parts) { const d = p.inlineData || p.inline_data; if (!d || !d.data) continue; if (c.v) { if (c.v === liveWant(t)) livePlay(d.data); } else { c.hold.push(d.data); if (c.hold.length > 16) c.hold.shift(); } }
+    if (itx || otx) { live.lastVoice = Date.now(); clearTimeout(c.tm); c.tm = setTimeout(() => liveFlush(t), 1800); liveShow(); }
   }
   function liveOpen(t, sys) {   // 接通一条连接，谷歌回"准备好了"才算数
     return new Promise((res, rej) => {
@@ -888,7 +899,7 @@ function viewTr() {
       }
       const sys = liveSys(); live.ws = []; await Promise.all(['km', 'zh'].map(t => liveOpen(t, sys)));
       if (!live.starting) return;   // 还没接通就被点了取消
-      live.pcm = new Int16Array(0); live.playEnd = 0; live.played = 0; live.cur = {}; live.lastVoice = live.t0 = Date.now();
+      live.pcm = new Int16Array(0); live.playEnd = 0; live.played = 0; live.cur = {}; live.lang = ''; live.lastVoice = live.t0 = Date.now();
       if (!fake) {
         live.node = live.ctx.createMediaStreamSource(Rec.stream); live.proc = live.ctx.createScriptProcessor(4096, 1, 1);
         const ratio = live.ctx.sampleRate / 16000;

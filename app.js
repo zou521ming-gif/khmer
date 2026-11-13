@@ -361,10 +361,11 @@ const SYS = `你是土生土长的金边人，同时精通中文。用户是在�
 
 翻译要求：
 1. 用金边人日常口语，像本地老板当面跟员工说话那样自然、客气、简短。不要书面语、公文腔，不要报纸新闻用词，不要王室或僧侣用语。
-2. 说话人是男性。称呼对方用口语里自然的方式（比如 បង / អូន，或者直接省略主语）。
-3. 贩卖机、饮料、补货、零钱、钥匙这类词，用本地员工平时真正会说的说法，口语里常用的外来词可以用。
+2. 说话人是男性，听的人是员工，男女都有。原话里没有称呼就不要加称呼，直接省略主语。绝对不要用 អូន 称呼员工（男人这样叫女员工像在叫女朋友）。原话里叫了人，对比自己小的用 ប្អូន，对比自己大的用 បង。
+3. 这几个词用固定说法，不要换别的词：机器、贩卖机 = ម៉ាស៊ីន（要说全就是 ម៉ាស៊ីនលក់ទឹក），不要说成 ទូ；补货、补饮料 = ដាក់ទឹកថែម；饮料 = ទឹក。零钱、钥匙等其他词，用本地员工平时真正会说的说法，口语里常用的外来词可以用。
 4. 一句话一个意思，句子尽量短。原话如果有歧义，按最可能的工作场景理解，并在 note 里用中文说明你是怎么理解的。
 5. 如果原话不是一句要翻译的话（比如空的、乱码），km 留空，note 说明原因。
+6. 忠实原话：不要添加原话里没有的意思，也不要漏掉原话里有的意思。
 
 读音提示 ro 的写法（给只会汉语拼音的人看）：
 - 按汉语拼音读：b d g 不送气（对应 ប៉/ព、ត/ទ、ក/គ），p t k 送气（ផ/ភ、ថ/ធ、ខ/ឃ），j = ច/ជ，q = ឆ/ឈ，ny = ញ，ng = ង，w = វ。
@@ -433,9 +434,10 @@ const SYS_KM_AUDIO = `你是精通高棉语和中文的口译员。录音里是�
 4. 如果录音里没有人说话，km 和 zh 都留空。
 
 只输出一个 JSON 对象，不要任何别的文字，不要代码块标记：{"km":"听到的高棉文","zh":"中文意思","sure":true,"note":""}`;
+const TR_V = 2;   // 翻译要求的版本号。改了翻译要求就加一，旧版本存下的句子会重新翻（员工听懂过的照旧用）
 const fastOn = () => S.set.trEngine !== 'claude' && !!S.set.gKey;
 const audioParts = async wav => [{ inlineData: { mimeType: 'audio/wav', data: await blobToB64(wav) } }, { text: '请听这段录音。' }];
-function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words: [], back: '', note: '', tip: '', by: '谷歌', ts: Date.now(), uses: 0, staff: null }; }
+function basePhrase(zh, km) { return { zh, km: String(km).trim(), ro: '', words: [], back: '', note: '', tip: '', by: '谷歌', ts: Date.now(), uses: 0, staff: null, v: TR_V }; }
 async function quickKm(zh, prev) {
   let user = '中文原话：' + zh;
   if (prev) user += `\n\n上一次的译法是「${prev}」，本地员工没听懂或者觉得不自然。请换一种更口语、更简单的说法。`;
@@ -583,9 +585,10 @@ function viewTr() {
     pend = { side: 'me', text: '正在翻译：' + zh }; err = null; render();
     try {
       let p = prev ? null : await idb('phrases', 'readonly', s => s.get(k)), fresh = false;
+      if (p && p.v !== TR_V && p.staff !== 'ok') p = null;
       if (!p) {
         if (fastOn()) { p = basePhrase(zh, km0 && isKm(km0) ? km0 : await quickKm(zh, prev)); fresh = true; }
-        else p = await translate(zh, prev);
+        else { p = await translate(zh, prev); p.v = TR_V; }
       }
       p.uses = (p.uses || 0) + 1; p.last = Date.now();
       await idb('phrases', 'readwrite', s => s.put(p, k));

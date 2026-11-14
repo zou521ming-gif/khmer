@@ -795,9 +795,15 @@ function viewTr() {
     ['#hZh', '#hKm'].forEach(q => { const h = $(q); if (h) { h.disabled = on; h.style.opacity = on ? '.35' : ''; } }); fit(); };
   const liveHint = t => { if (!live.on) return; pend = { side: 'me', text: t || ('免按模式开着：直接说，说完停一下就翻。机器念的时候先别说话。' + (live.lag ? '（上一句：说完 ' + live.lag + ' 秒出字）' : '')) }; err = null; render(); };
   /* 中文用设备自带的嗓音念，不用等谷歌合成（省大约 3 秒）。设备没有中文嗓音时才退回谷歌。高棉语设备上没有嗓音，只能用谷歌的。 */
-  const zhVoice = () => { try { return 'speechSynthesis' in window && speechSynthesis.getVoices().some(v => /^(zh|cmn)/i.test(v.lang)); } catch (e) { return false; } };
-  const sayZh = text => !zhVoice() ? say(text) : new Promise(res => { const u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.05; let done = false; const fin = () => { if (!done) { done = true; res(); } };
-    u.onend = fin; u.onerror = fin; setTimeout(fin, 2500 + text.length * 350); try { speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) { fin(); } });
+  /* 2026-11-14 小黑反馈"声音一会男一会女"。实测谷歌的两个嗓音是稳的（Fola 女、Rami 男），乱是因为设备自带嗓音不管设置里选的男声女声。
+     所以按设置挑：选女声就找设备里的普通话女声，选男声就找普通话男声；设备里找不到对应的，就退回谷歌嗓音（慢一点，但声音一致）。粤语嗓音不用。 */
+  const ZH_F = /婷婷|ting-?ting|语舒|yu-?shu|美嘉|mei-?jia|xiaoxiao|xiaoyi|google|female|女/i, ZH_M = /li-?mu|yunxi|yunyang|yunjian|kangkang|male|男/i;
+  const zhVoice = () => { try { if (!('speechSynthesis' in window)) return null; const male = S.set.voice === 'm';
+    const vs = speechSynthesis.getVoices().filter(v => /^(zh[-_](CN|TW)|cmn)/i.test(v.lang) && (male ? ZH_M.test(v.name) && !/female|女/i.test(v.name) : ZH_F.test(v.name) && !ZH_M.test(v.name.replace(/female/i, ''))));
+    return vs.find(v => /CN|cmn/i.test(v.lang)) || vs[0] || null; } catch (e) { return null; } };
+  const sayZh = text => { const v = zhVoice(); if (!v) return say(text);
+    return new Promise(res => { const u = new SpeechSynthesisUtterance(text); u.voice = v; u.lang = v.lang; u.rate = 1.05; let done = false; const fin = () => { if (!done) { done = true; res(); } };
+      u.onend = fin; u.onerror = fin; setTimeout(fin, 2500 + text.length * 350); try { speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) { fin(); } }); };
   const liveSpeak = async f => { live.speaking = true; try { await Promise.race([f(), new Promise(r => setTimeout(r, 25000))]); } catch (e) { console.warn(e); } finally { live.speaking = false; } };   // 念的时候不听；万一念不出来，最多 25 秒后照常接着听
   async function liveDo(wav, tEnd) {   // 一整句录好了：同时按"是中文"和"是高棉语"各听一遍，看它自己说是哪种话，用对的那个
     if (!live.on) return;

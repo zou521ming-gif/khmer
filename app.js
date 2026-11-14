@@ -793,19 +793,24 @@ function viewTr() {
     b.textContent = live.on ? '免按模式开着 · 点这里停止' : live.starting ? '正在打开麦克风…' : '免按模式（试用）：点一下开始，两个人直接说，说完停一下就翻';
     b.style.background = on ? '#e5484d' : ''; b.style.color = on ? '#fff' : '';
     ['#hZh', '#hKm'].forEach(q => { const h = $(q); if (h) { h.disabled = on; h.style.opacity = on ? '.35' : ''; } }); fit(); };
-  const liveHint = t => { if (!live.on) return; pend = { side: 'me', text: t || '免按模式开着：直接说，说完停一下就翻。机器念的时候先别说话。' }; err = null; render(); };
+  const liveHint = t => { if (!live.on) return; pend = { side: 'me', text: t || ('免按模式开着：直接说，说完停一下就翻。机器念的时候先别说话。' + (live.lag ? '（上一句：说完 ' + live.lag + ' 秒出字）' : '')) }; err = null; render(); };
+  /* 中文用设备自带的嗓音念，不用等谷歌合成（省大约 3 秒）。设备没有中文嗓音时才退回谷歌。高棉语设备上没有嗓音，只能用谷歌的。 */
+  const zhVoice = () => { try { return 'speechSynthesis' in window && speechSynthesis.getVoices().some(v => /^(zh|cmn)/i.test(v.lang)); } catch (e) { return false; } };
+  const sayZh = text => !zhVoice() ? say(text) : new Promise(res => { const u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.05; let done = false; const fin = () => { if (!done) { done = true; res(); } };
+    u.onend = fin; u.onerror = fin; setTimeout(fin, 2500 + text.length * 350); try { speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (e) { fin(); } });
   const liveSpeak = async f => { live.speaking = true; try { await Promise.race([f(), new Promise(r => setTimeout(r, 25000))]); } catch (e) { console.warn(e); } finally { live.speaking = false; } };   // 念的时候不听；万一念不出来，最多 25 秒后照常接着听
-  async function liveDo(wav) {   // 一整句录好了：同时按"是中文"和"是高棉语"各听一遍，看它自己说是哪种话，用对的那个
+  async function liveDo(wav, tEnd) {   // 一整句录好了：同时按"是中文"和"是高棉语"各听一遍，看它自己说是哪种话，用对的那个
     if (!live.on) return;
     liveHint('正在翻译…');
     try {
       const [k, z] = await Promise.all([hearKm(wav, null, ctxOf()).catch(e => ({ fail: e })), hearZh(wav).catch(e => ({ fail: e }))]);
       if (!live.on) return;
+      live.lag = ((Date.now() - tEnd) / 1000 + 0.6).toFixed(1);   // 从说完（含等停顿的 0.6 秒）到出字用了多久
       if (k.fail && z.fail) throw k.fail;
       if (!k.fail && k.lang === 'km' && k.km && k.zh) {   // 员工说的高棉语：出中文，并且念出来
         const x = { t: 'st', km: k.km, zh: k.zh, lit: k.lit, sure: k.sure, note: k.note, secs: wavSecs(wav), at: Date.now() }; WAVS.set(x, wav);
         log.push(x); pend = null; persist(); render();
-        await liveSpeak(() => say(k.zh));
+        await liveSpeak(() => sayZh(k.zh));
       } else if (!z.fail && z.zh && HAS_ZH.test(z.zh) && (k.fail || k.lang === 'zh')) {   // 我说的中文：出高棉语并念出来
         await liveSpeak(() => sendZh(z.zh, null, null, z.km));
       } else { liveHint('刚才那段没听出是中文还是高棉语，没有翻。要是有人说了话，请再说一遍。'); return; }   // 两边都不认（杂音、别的语言）：不出气泡，只提示一句
@@ -825,15 +830,16 @@ function viewTr() {
     if (!g) {
       live.pre.push(chunk); if (live.pre.length > 4) live.pre.shift();   // 留着开口前 0.4 秒，免得第一个字被切掉
       live.hot = loud ? live.hot + 1 : 0;
-      if (live.hot >= 2) { live.seg = { parts: live.pre.slice(), voiced: 2, quiet: 0, len: live.pre.length }; live.pre = []; live.hot = 0; liveHint('在听…说完停一下'); }
+      if (live.hot >= 2) { live.seg = { parts: live.pre.slice(), voiced: 2, quiet: 0, len: live.pre.length, lvl: rms }; live.pre = []; live.hot = 0; liveHint('在听…说完停一下'); }
     } else {
-      g.parts.push(chunk); g.len++; if (loud) { g.voiced++; g.quiet = 0; } else g.quiet++;
-      if (g.quiet >= 8 || g.len >= 250) {   // 停了 0.8 秒，或者一口气说了 25 秒
+      const talking = loud && rms > g.lvl * 0.35;   // 比刚才说话的声音小很多，就算背景还吵，也当作停了
+      g.parts.push(chunk); g.len++; if (talking) { g.voiced++; g.quiet = 0; g.lvl = g.lvl * 0.8 + rms * 0.2; } else g.quiet++;
+      if (g.quiet >= 6 || g.len >= 250) {   // 停了 0.6 秒，或者一口气说了 25 秒
         live.seg = null;
         if (g.voiced >= 4) {   // 有声音的部分不到 0.4 秒：多半是碰了一下、咳一声，不送
           let m = 0; g.parts.forEach(a => m += a.length); const all = new Int16Array(m); let o = 0; g.parts.forEach(a => { all.set(a, o); o += a.length; });
           const wav = new Blob([pcmToWav(all.buffer, 16000)], { type: 'audio/wav' }); live.lastVoice = Date.now(); live.segs++;
-          live.chain = live.chain.then(() => liveDo(wav));
+          const tEnd = Date.now(); live.chain = live.chain.then(() => liveDo(wav, tEnd));
         } else liveHint();
       }
     }
@@ -867,6 +873,7 @@ function viewTr() {
         live.node.connect(live.proc); live.proc.connect(live.ctx.destination);
       }
       live.pcm = new Int16Array(0); live.seg = null; live.pre = []; live.hot = 0; live.floor = 0.004; live.speaking = false; live.chain = Promise.resolve(); live.lastVoice = Date.now(); live.segs = 0;
+      live.lag = ''; try { if ('speechSynthesis' in window) { speechSynthesis.getVoices(); const u0 = new SpeechSynthesisUtterance(' '); u0.volume = 0; speechSynthesis.speak(u0); } } catch (e) { console.warn(e); }   // 趁着点按的当下先让设备的嗓音开个口，苹果手机之后才肯自动念
       live.on = true; live.starting = false; live.timer = setInterval(liveTick, 100); paintLive(); liveHint();
     } catch (e) { liveEnd(e instanceof AppErr ? e : new AppErr('免按模式开不了', String(e && (e.message || e)))); }
   }

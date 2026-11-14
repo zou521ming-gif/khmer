@@ -803,17 +803,25 @@ function viewTr() {
     if (!live.on) return;
     liveHint('正在翻译…');
     try {
-      const [k, z] = await Promise.all([hearKm(wav, null, ctxOf()).catch(e => ({ fail: e })), hearZh(wav).catch(e => ({ fail: e }))]);
+      /* 2026-11-14 实测：原来两遍（按中文听、按高棉语听）都要等齐才出结果。员工说高棉语时，"按中文听"那一遍对着高棉语瞎琢磨，有一次拖了 25 秒，
+         白白让员工这边跟着等。现在先只等"按高棉语听"的那遍：它说是高棉语，马上出结果；它说是中文，才去等另一遍，最多再等 6 秒，等不到就拿它听到的中文直接翻。 */
+      const pz = hearZh(wav).catch(e => ({ fail: e }));
+      const k = await hearKm(wav, null, ctxOf()).catch(e => ({ fail: e }));
       if (!live.on) return;
-      live.lag = ((Date.now() - tEnd) / 1000 + 0.6).toFixed(1);   // 从说完（含等停顿的 0.6 秒）到出字用了多久
-      if (k.fail && z.fail) throw k.fail;
+      const lagNow = () => { live.lag = ((Date.now() - tEnd) / 1000 + 0.6).toFixed(1); };   // 从说完（含等停顿的 0.6 秒）到出字用了多久
       if (!k.fail && k.lang === 'km' && k.km && k.zh) {   // 员工说的高棉语：出中文，并且念出来
-        const x = { t: 'st', km: k.km, zh: k.zh, lit: k.lit, sure: k.sure, note: k.note, secs: wavSecs(wav), at: Date.now() }; WAVS.set(x, wav);
+        lagNow(); const x = { t: 'st', km: k.km, zh: k.zh, lit: k.lit, sure: k.sure, note: k.note, secs: wavSecs(wav), at: Date.now() }; WAVS.set(x, wav);
         log.push(x); pend = null; persist(); render();
         await liveSpeak(() => sayZh(k.zh));
-      } else if (!z.fail && z.zh && HAS_ZH.test(z.zh) && (k.fail || k.lang === 'zh')) {   // 我说的中文：出高棉语并念出来
-        await liveSpeak(() => sendZh(z.zh, null, null, z.km));
-      } else { liveHint('刚才那段没听出是中文还是高棉语，没有翻。要是有人说了话，请再说一遍。'); return; }   // 两边都不认（杂音、别的语言）：不出气泡，只提示一句
+      } else if (k.fail || k.lang === 'zh') {   // 我说的中文：出高棉语并念出来
+        const z = await Promise.race([pz, new Promise(r => setTimeout(() => r({ slow: true }), 6000))]);
+        if (!live.on) return;
+        if (k.fail && z.fail) throw k.fail;
+        lagNow();
+        if (z.zh && HAS_ZH.test(z.zh)) await liveSpeak(() => sendZh(z.zh, null, null, z.km));
+        else if (!k.fail && k.zh && HAS_ZH.test(k.zh)) await liveSpeak(() => sendZh(k.zh));
+        else { liveHint('刚才那段没听出是中文还是高棉语，没有翻。要是有人说了话，请再说一遍。'); return; }
+      } else { liveHint('刚才那段没听出是中文还是高棉语，没有翻。要是有人说了话，请再说一遍。'); return; }   // 杂音、别的语言：不出气泡，只提示一句
     } catch (e) { setErr('me', e); return; }
     liveHint();
   }
